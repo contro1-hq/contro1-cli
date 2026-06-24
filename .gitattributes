@@ -1,0 +1,4 @@
+# Normalize line endings. Shell scripts must stay LF so `curl | sh` works.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.exe binary

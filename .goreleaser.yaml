@@ -29,9 +29,10 @@ archives:
     # Stable asset names the install scripts rely on:
     #   contro1_<version>_<os>_<arch>.tar.gz   (.zip on windows)
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
 
 checksum:
   name_template: "checksums.txt"
