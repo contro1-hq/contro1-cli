@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	DefaultAPIURL = "http://localhost:8080"
-	DefaultWebURL = "http://localhost:3000"
+	// Production defaults so a freshly installed CLI works with no configuration.
+	// Point at a local stack with `contro1 config set api-url/web-url` for dev.
+	DefaultAPIURL = "https://api.contro1.com"
+	DefaultWebURL = "https://contro1.com"
 )
 
 // Profile is a single named configuration.

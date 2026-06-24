@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"net/url"
 	"strings"
 	"time"
 
@@ -131,14 +132,15 @@ func runRequestList(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	path := "/api/centcom/v1/requests?limit=" + itoa(reqListLimit)
+	q := url.Values{}
+	q.Set("limit", itoa(reqListLimit))
 	if reqListState != "" {
-		path += "&state=" + reqListState
+		q.Set("state", reqListState)
 	}
 	if reqListAgent != "" {
-		path += "&agent_id=" + reqListAgent
+		q.Set("agent_id", reqListAgent)
 	}
-	resp, err := c.Do("GET", path, nil)
+	resp, err := c.Do("GET", "/api/centcom/v1/requests?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -159,7 +161,7 @@ func runRequestGet(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.Do("GET", "/api/centcom/v1/requests/"+args[0], nil)
+	resp, err := c.Do("GET", "/api/centcom/v1/requests/"+url.PathEscape(args[0]), nil)
 	if err != nil {
 		return err
 	}
@@ -183,7 +185,7 @@ func runRequestCancel(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.Do("DELETE", "/api/centcom/v1/requests/"+args[0], nil)
+	resp, err := c.Do("DELETE", "/api/centcom/v1/requests/"+url.PathEscape(args[0]), nil)
 	if err != nil {
 		return err
 	}
@@ -197,7 +199,7 @@ func waitForRequest(c *client.Client, id string, timeout, interval time.Duration
 	deadline := time.Now().Add(timeout)
 	infof("Waiting for a decision on %s ...", id)
 	for {
-		resp, err := c.Do("GET", "/api/centcom/v1/requests/"+id, nil)
+		resp, err := c.Do("GET", "/api/centcom/v1/requests/"+url.PathEscape(id), nil)
 		if err != nil {
 			return nil, "", err
 		}

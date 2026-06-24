@@ -1,10 +1,11 @@
 # contro1 CLI
 
-The official command-line interface for the **Contro1** Human Approval Layer.
+The official developer CLI for connecting **AI agents** to Contro1.
 
-It lets developers and AI coding agents work through Contro1 in practice: register
-agents, create and wait for approval requests, **run gated commands**, and retrieve
-audit-ready evidence - using a **scoped, browser-issued token** (gcloud-style login).
+Use `contro1` to register agents, create human approval requests, attribute actions
+to an agent, update AI inventory, and retrieve audit-ready evidence from the
+terminal, scripts, or CI. For coding agents and developer workflows, the CLI can
+also put approval in front of a local command before it runs.
 
 > v1 is broad around a *safe workflow*, not admin power. A CLI token can do the
 > developer/agent workflow but **cannot** perform destructive org administration
@@ -38,12 +39,39 @@ Maintainers cut releases by pushing a tag (`git tag v0.1.0 && git push origin v0
 ## Quick start
 
 ```bash
+contro1 auth login                 # opens the browser to approve (defaults to api.contro1.com)
+contro1 whoami
+
+contro1 agents register --name "Claude Code - Laptop" --type coding-agent
+contro1 requests create \
+  --type approval \
+  --question "Approve sending this customer email?" \
+  --agent agt_123 \
+  --wait
+
+contro1 evidence for-request <request_id>
+```
+
+The CLI defaults to the hosted Contro1 (`https://api.contro1.com` / `https://contro1.com`),
+so no configuration is needed. To point at a local stack or a self-hosted instance:
+
+```bash
 contro1 config set api-url http://localhost:8080
 contro1 config set web-url http://localhost:3000
-contro1 auth login                 # opens the browser to approve
-contro1 whoami
-contro1 run --requires-approval -- npm run deploy
 ```
+
+## What the CLI is for
+
+The CLI is the fastest way to try and integrate Contro1 before writing a full
+SDK/API integration.
+
+1. Connect AI agents to Contro1 quickly: register the agent, attribute approval
+   requests to it, and inspect the resulting evidence.
+2. Test agent workflows manually: identity, approval request, human decision,
+   evidence packet, and trace lookup.
+3. Use scripts or CI when they are the right delivery channel. `contro1 run` is
+   useful for coding agents and deployment steps, but command gating is one
+   capability inside the broader agent workflow.
 
 ## Authentication
 
@@ -71,6 +99,44 @@ Operator queue:    queue
 
 Run `contro1 help` for the grouped list, or `contro1 <topic> --help` for details.
 
+## Agent workflow
+
+```bash
+# Register an agent once
+contro1 agents register --name "Support Agent" --type custom-agent
+contro1 agents list
+
+# Ask a human before the agent acts
+contro1 requests create \
+  --type approval \
+  --question "Approve refunding order #1842?" \
+  --agent agt_123 \
+  --risk high \
+  --reason "Customer exception policy" \
+  --wait
+
+# Pull the record later
+contro1 evidence for-request <request_id>
+contro1 traces for-request <request_id>
+
+# Keep inventory current
+contro1 ai-registry import ./inventory.json
+contro1 ai-registry list
+```
+
+## Optional command gating
+
+For coding agents and developer workflows, `contro1 run` asks for approval, waits
+for the decision, and only runs the local command if approved.
+
+```bash
+contro1 run --requires-approval -- npm run deploy
+contro1 run --agent agt_123 --risk high --reason "DB migration" -- npm run migrate
+```
+
+The execution evidence is marked `client-reported`: it records what the local
+machine reported after an approved action, not a cryptographic attestation.
+
 ## Output and exit codes
 
 Every command supports `--format table|json|yaml` (table default for humans, JSON
@@ -89,8 +155,13 @@ operator:me:read  org:read
 agents:read  agents:register  agents:trail:read
 requests:create  requests:read  requests:wait  requests:cancel_own  requests:respond_if_assigned
 evidence:read  traces:read
+ai_registry:read  ai_registry:import
 api_keys:read  webhooks:read  integrations:read  queue:read
 ```
+
+`requests:cancel_own` lets a CLI token cancel only requests it created (each request is
+tagged with the creating token id). Full token management (listing/revoking other tokens)
+is a dashboard action - a CLI token can only revoke itself.
 
 Tokens expire after 90 days and can be revoked from `contro1 auth tokens revoke <id>`
 or the dashboard (Settings -> APIs & Webhooks -> CLI Access Tokens).
