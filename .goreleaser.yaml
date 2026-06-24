@@ -1,0 +1,41 @@
+# GoReleaser config for the contro1 CLI.
+# Build cross-platform binaries with: goreleaser release --clean (or --snapshot for local).
+version: 2
+
+project_name: contro1
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: contro1
+    main: .
+    binary: contro1
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    # Stable asset names the install scripts rely on:
+    #   contro1_<version>_<os>_<arch>.tar.gz   (.zip on windows)
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  # Publish (not draft) so install scripts can resolve /releases/latest.
+  draft: false
