@@ -1,11 +1,13 @@
 # contro1 CLI
 
-The official developer CLI for connecting **AI agents** to Contro1.
+The terminal control layer for **AI agent approvals**, routing checks, and
+audit evidence.
 
-Use `contro1` to register agents, create human approval requests, attribute actions
-to an agent, update AI inventory, and retrieve audit-ready evidence from the
-terminal, scripts, or CI. For coding agents and developer workflows, the CLI can
-also put approval in front of a local command before it runs.
+Use `contro1` from a terminal, script, CI job, or coding agent to register
+agents, preview Control Map routing, create role-based approval requests,
+enforce quorum, wait for decisions, and retrieve audit-ready evidence. For
+developer workflows, the CLI can also put approval in front of a local command
+before it runs.
 
 > v1 is broad around a *safe workflow*, not admin power. A CLI token can do the
 > developer/agent workflow but **cannot** perform destructive org administration

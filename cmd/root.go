@@ -28,19 +28,21 @@ var (
 
 // Command groups (topics) for `contro1 help`.
 const (
-	groupCore    = "core"
-	groupAgent   = "agent"
-	groupAdmin   = "admin"
-	groupQueue   = "queue"
+	groupCore  = "core"
+	groupAgent = "agent"
+	groupAdmin = "admin"
+	groupQueue = "queue"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "contro1",
-	Short: "Contro1 CLI - connect AI agents to Contro1",
-	Long: `contro1 is the developer CLI for connecting AI agents to Contro1.
+	Short: "Contro1 CLI - approvals, routing and evidence for AI agents",
+	Long: `contro1 brings Contro1 approvals, routing checks and evidence into the
+terminal workflows where AI agents and developers already work.
 
-Register agents, create and wait for approval requests, update AI inventory, and
-retrieve audit-ready evidence - all with a scoped, browser-issued token.
+Register agents, preview Control Map routing, create role-based approval
+requests, enforce quorum, wait for decisions, update AI inventory, and retrieve
+audit-ready evidence - all with a scoped, browser-issued token.
 
 For coding agents and developer workflows, contro1 can also gate a local command
 before it runs.

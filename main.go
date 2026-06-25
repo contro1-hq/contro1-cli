@@ -1,10 +1,10 @@
-// Command contro1 is the official developer CLI for connecting AI agents to
-// Contro1.
+// Command contro1 exposes Contro1 approval, routing, inventory and evidence
+// workflows to terminals, scripts, CI jobs and coding agents.
 //
-// It lets developers and AI coding agents register agents, create and wait for
-// approval requests, update inventory, and retrieve audit-ready evidence using a
-// scoped, browser-issued token. Coding agents can also gate local commands when
-// a shell step is the action being controlled.
+// It lets developers and agents register identities, preview Control Map
+// routing, create role-based approval requests, enforce quorum, wait for
+// decisions, update inventory, and retrieve audit-ready evidence using a scoped,
+// browser-issued token.
 package main
 
 import (
