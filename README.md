@@ -165,3 +165,25 @@ is a dashboard action - a CLI token can only revoke itself.
 
 Tokens expire after 90 days and can be revoked from `contro1 auth tokens revoke <id>`
 or the dashboard (Settings -> APIs & Webhooks -> CLI Access Tokens).
+
+## Testing
+
+Unit tests (pure logic - PKCE, output, decision classification) run with no setup:
+
+```bash
+go test ./...
+```
+
+End-to-end tests exercise every documented command against a live backend. They are
+gated behind the `e2e` build tag and skip unless you provide a token and API URL:
+
+```bash
+# get a token once: contro1 auth login && contro1 auth print-access-token --yes
+export CONTRO1_API_URL=https://api.contro1.com   # or your local stack
+export CONTRO1_TOKEN=cco_cli_live_xxx
+go test -tags e2e -v .
+```
+
+The e2e suite (`e2e_test.go`) covers auth/whoami/doctor/scopes, config, agents,
+requests (create/get/list/wait), evidence, ai-registry import/list, the read-only
+admin and queue views, help topic grouping, and the documented exit codes.

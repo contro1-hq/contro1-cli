@@ -1,8 +1,10 @@
-// Command contro1 is the official CLI for the Contro1 Human Approval Layer.
+// Command contro1 is the official developer CLI for connecting AI agents to
+// Contro1.
 //
-// It lets developers and AI coding agents work through Contro1 in practice:
-// register agents, create and wait for approval requests, run gated commands,
-// and retrieve audit-ready evidence - using a scoped, browser-issued token.
+// It lets developers and AI coding agents register agents, create and wait for
+// approval requests, update inventory, and retrieve audit-ready evidence using a
+// scoped, browser-issued token. Coding agents can also gate local commands when
+// a shell step is the action being controlled.
 package main
 
 import (

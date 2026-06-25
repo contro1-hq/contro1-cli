@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/contro1-hq/contro1-cli/internal/client"
 	"github.com/contro1-hq/contro1-cli/internal/config"
@@ -35,22 +36,28 @@ const (
 
 var rootCmd = &cobra.Command{
 	Use:   "contro1",
-	Short: "Contro1 CLI - human approval layer for AI workflows",
-	Long: `contro1 is the official CLI for the Contro1 Human Approval Layer.
+	Short: "Contro1 CLI - connect AI agents to Contro1",
+	Long: `contro1 is the developer CLI for connecting AI agents to Contro1.
 
-Register agents, create and wait for approval requests, run gated commands, and
+Register agents, create and wait for approval requests, update AI inventory, and
 retrieve audit-ready evidence - all with a scoped, browser-issued token.
+
+For coding agents and developer workflows, contro1 can also gate a local command
+before it runs.
 
 Get started:
   contro1 auth login
   contro1 whoami
-  contro1 run --requires-approval -- npm run deploy`,
+  contro1 agents register --name "Claude Code - Laptop" --type coding-agent
+  contro1 requests create --type approval --question "Approve this action?" --agent agt_123 --wait`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 }
 
 // Execute runs the root command and returns a process exit code.
 func Execute() int {
+	// Wire the version (set from main after init) so `contro1 --version` works.
+	rootCmd.Version = Version
 	if err := rootCmd.Execute(); err != nil {
 		var ee *output.ExitError
 		if asExit(err, &ee) {
@@ -58,9 +65,35 @@ func Execute() int {
 			return ee.Code
 		}
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
+		// Cobra usage errors (bad flags/args/unknown command) map to exit 2.
+		if isUsageError(err.Error()) {
+			return output.CodeBadArgs
+		}
 		return output.CodeGeneral
 	}
 	return output.CodeOK
+}
+
+// isUsageError detects Cobra's argument/flag/usage error messages so they map to
+// the documented "bad arguments" exit code (2) rather than a general error.
+func isUsageError(msg string) bool {
+	for _, p := range []string{
+		"unknown command",
+		"unknown flag",
+		"unknown shorthand flag",
+		"required flag",
+		"invalid argument",
+		"flag needs an argument",
+		"accepts ",
+		"requires at least",
+		"requires exactly",
+		"requires between",
+	} {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {
