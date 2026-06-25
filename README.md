@@ -34,7 +34,8 @@ git clone https://github.com/contro1-hq/contro1-cli.git
 cd contro1-cli && go build -o contro1 .
 ```
 
-Maintainers cut releases by pushing a tag (`git tag v0.1.0 && git push origin v0.1.0`); GoReleaser builds the cross-platform binaries (`.goreleaser.yaml`, `.github/workflows/release.yml`).
+Release archives are built automatically from GitHub Releases. Most users should
+install with the script above or download the latest release archive directly.
 
 ## Quick start
 
@@ -47,6 +48,7 @@ contro1 requests create \
   --type approval \
   --question "Approve sending this customer email?" \
   --agent agt_123 \
+  --role support-manager \
   --wait
 
 contro1 evidence for-request <request_id>
@@ -111,6 +113,7 @@ contro1 requests create \
   --type approval \
   --question "Approve refunding order #1842?" \
   --agent agt_123 \
+  --role support-manager \
   --risk high \
   --reason "Customer exception policy" \
   --wait
@@ -124,6 +127,82 @@ contro1 ai-registry import ./inventory.json
 contro1 ai-registry list
 ```
 
+## Routing, Control Map and quorum
+
+Use role routing when the request must go to a specific business owner. Use
+Control Map before creating a high-risk request when the agent should know
+whether the role, shift coverage and quorum are currently satisfiable.
+
+```bash
+# Preview who can approve before creating a request
+contro1 requests control-map \
+  --role finance \
+  --required-approvals 2 \
+  --approval-role finance \
+  --must-include-role cfo
+
+# Create the real request with the same routing and quorum
+contro1 requests create \
+  --type approval \
+  --question "Approve vendor transfer #9831?" \
+  --context "Invoice exceeds auto-pay policy; PO and invoice are attached." \
+  --agent agt_123 \
+  --role finance \
+  --required-approvals 2 \
+  --approval-role finance \
+  --must-include-role cfo \
+  --sla-minutes 10 \
+  --risk high \
+  --reason "Payment exceeds autonomous limit" \
+  --correlation-id case-transfer-9831 \
+  --external-request-id transfer-9831-approval \
+  --trace-id trc_transfer_9831 \
+  --wait
+```
+
+Useful non-admin request flags:
+
+```
+--role <role>                    route to a reviewer role
+--required-approvals <n>          enforce approval quorum (uses threshold mode by default)
+--approval-mode <mode>            single|all_of|any_of|threshold
+--approval-role <role>            required approval role; repeat or comma-separate
+--must-include-role <role>        expected role for evidence/control-map
+--separation-of-duties=false      allow one person to satisfy multiple approvals
+--fail-closed-on-timeout=false    do not fail closed on timeout
+--strict-policy                   block when strict policy checks fail
+--approval-comment-required       require approval comments
+--sla-minutes <n>                 SLA before escalation
+--correlation-id <id>             case/business id across related records
+--external-request-id <id>        idempotency key for retries
+--thread-id <thr_...>             conversation/thread timeline id
+--trace-id <trc_...>              execution trace id
+--parent-trace-id <trc_...>       parent trace for sub-agent runs
+```
+
+For payloads that already match the public API, pass JSON directly. This is the
+best path for advanced protocol fields, response schemas, tool calls,
+sub-agents, retrieved context, or policy objects that should stay versioned in
+your agent repo.
+
+```bash
+contro1 requests control-map --file request.json --format json
+contro1 requests create --file request.json --wait
+```
+
+You can also attach structured JSON fragments without writing the full body:
+
+```bash
+contro1 requests create \
+  --question "Approve publishing generated campaign?" \
+  --role marketing-manager \
+  --tool-calls-file tool-calls.json \
+  --retrieved-context-file retrieved-context.json \
+  --policy-context-file policy-context.json \
+  --response-schema-file response-schema.json \
+  --wait
+```
+
 ## Optional command gating
 
 For coding agents and developer workflows, `contro1 run` asks for approval, waits
@@ -131,7 +210,13 @@ for the decision, and only runs the local command if approved.
 
 ```bash
 contro1 run --requires-approval -- npm run deploy
-contro1 run --agent agt_123 --risk high --reason "DB migration" -- npm run migrate
+contro1 run \
+  --agent agt_123 \
+  --role release-manager \
+  --required-approvals 2 \
+  --risk high \
+  --reason "DB migration" \
+  -- npm run migrate
 ```
 
 The execution evidence is marked `client-reported`: it records what the local

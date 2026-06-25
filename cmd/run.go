@@ -12,12 +12,20 @@ import (
 )
 
 var (
-	runAgent           string
-	runRisk            string
-	runReason          string
-	runType            string
-	runTimeout         time.Duration
-	runRequiresApprove bool
+	runAgent             string
+	runRisk              string
+	runReason            string
+	runType              string
+	runRole              string
+	runSLAMinutes        int
+	runRequiredApprovals int
+	runApprovalRoles     []string
+	runMustIncludeRoles  []string
+	runCorrelationID     string
+	runExternalRequestID string
+	runTraceID           string
+	runTimeout           time.Duration
+	runRequiresApprove   bool
 )
 
 func init() {
@@ -28,7 +36,7 @@ func init() {
 executes the command if it is approved. The command, working directory, git
 context, approver and exit code are recorded as audit-ready evidence.`,
 		Example: `  contro1 run --requires-approval -- npm run deploy
-  contro1 run --risk high --reason "DB migration" -- npm run migrate`,
+  contro1 run --role release-manager --required-approvals 2 --risk high --reason "DB migration" -- npm run migrate`,
 		GroupID: groupAgent,
 		RunE:    runRun,
 	}
@@ -36,6 +44,14 @@ context, approver and exit code are recorded as audit-ready evidence.`,
 	runCmd.Flags().StringVar(&runRisk, "risk", "high", "risk level: low|medium|high|critical")
 	runCmd.Flags().StringVar(&runReason, "reason", "", "reason shown to the approver")
 	runCmd.Flags().StringVar(&runType, "type", "approval", "request type")
+	runCmd.Flags().StringVar(&runRole, "role", "", "required reviewer role")
+	runCmd.Flags().IntVar(&runSLAMinutes, "sla-minutes", 0, "SLA in minutes before escalation")
+	runCmd.Flags().IntVar(&runRequiredApprovals, "required-approvals", 0, "number of distinct approvals required")
+	runCmd.Flags().StringArrayVar(&runApprovalRoles, "approval-role", nil, "approval policy role; repeat or comma-separate")
+	runCmd.Flags().StringArrayVar(&runMustIncludeRoles, "must-include-role", nil, "role expected in evidence/control-map; repeat or comma-separate")
+	runCmd.Flags().StringVar(&runCorrelationID, "correlation-id", "", "case/business id shared across related records")
+	runCmd.Flags().StringVar(&runExternalRequestID, "external-request-id", "", "idempotency key for this external action")
+	runCmd.Flags().StringVar(&runTraceID, "trace-id", "", "trace id, e.g. trc_run_123")
 	runCmd.Flags().DurationVar(&runTimeout, "timeout", 15*time.Minute, "max time to wait for approval")
 	runCmd.Flags().BoolVar(&runRequiresApprove, "requires-approval", true, "require approval before running (always on in v1)")
 
@@ -76,16 +92,32 @@ func runRun(cmd *cobra.Command, args []string) error {
 		meta["actor"] = map[string]any{"agent_id": runAgent}
 	}
 	payload := map[string]any{
-		"type":           runType,
-		"question":       "Approve running: " + truncate(cmdStr, 120),
-		"context":        strings.Join(contextLines, "\n"),
-		"priority":       "urgent",
-		"risk_level":     runRisk,
-		"metadata":       meta,
+		"type":       runType,
+		"question":   "Approve running: " + truncate(cmdStr, 120),
+		"context":    strings.Join(contextLines, "\n"),
+		"priority":   "urgent",
+		"risk_level": runRisk,
+		"metadata":   meta,
+	}
+	if runRole != "" {
+		payload["required_role"] = runRole
+	}
+	if runSLAMinutes > 0 {
+		payload["sla_minutes"] = runSLAMinutes
+	}
+	if runCorrelationID != "" {
+		payload["correlation_id"] = runCorrelationID
+	}
+	if runExternalRequestID != "" {
+		payload["external_request_id"] = runExternalRequestID
+	}
+	if runTraceID != "" {
+		payload["trace_id"] = runTraceID
 	}
 	if runReason != "" {
 		payload["policy_trigger"] = runReason
 	}
+	attachRunApprovalFields(payload)
 
 	resp, err := c.Do("POST", "/api/centcom/v1/requests", payload)
 	if err != nil {
@@ -172,6 +204,42 @@ func recordRunEvidence(c *client.Client, reqID, command, cwd, branch, commit str
 		return ""
 	}
 	return str(asMap(resp["data"])["evidence_id"])
+}
+
+func attachRunApprovalFields(payload map[string]any) {
+	approvalRoles := normalizeStringList(runApprovalRoles)
+	if runRole != "" {
+		approvalRoles = appendUnique(approvalRoles, runRole)
+	}
+	mustIncludeRoles := normalizeStringList(runMustIncludeRoles)
+
+	policy := map[string]any{}
+	if runRequiredApprovals > 1 {
+		policy["mode"] = "threshold"
+	}
+	if runRequiredApprovals > 0 {
+		policy["required_approvals"] = runRequiredApprovals
+	}
+	if len(approvalRoles) > 0 {
+		policy["required_roles"] = approvalRoles
+	}
+	if len(policy) > 0 {
+		payload["approval_policy"] = policy
+	}
+
+	requirements := map[string]any{}
+	if runRequiredApprovals > 0 {
+		requirements["required_approvals"] = runRequiredApprovals
+	}
+	if len(approvalRoles) > 0 {
+		requirements["required_roles"] = approvalRoles
+	}
+	if len(mustIncludeRoles) > 0 {
+		requirements["must_include_roles"] = mustIncludeRoles
+	}
+	if len(requirements) > 0 {
+		payload["approval_requirements"] = requirements
+	}
 }
 
 func gitOutput(args ...string) string {

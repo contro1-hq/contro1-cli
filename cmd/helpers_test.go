@@ -59,3 +59,80 @@ func TestClassifyDecision(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildCreatePayloadAdvancedRouting(t *testing.T) {
+	reqPayloadFile = ""
+	reqType = "approval"
+	reqQuestion = "Approve payment?"
+	reqContext = ""
+	reqAgent = "agt_123"
+	reqRisk = "high"
+	reqReason = "Payment exceeds limit"
+	reqPriority = "urgent"
+	reqRole = "finance"
+	reqSLAMinutes = 10
+	reqExternalRequestID = "payment-1"
+	reqCorrelationID = "case-payment-1"
+	reqTraceID = "trc_payment_1"
+	reqApprovalMode = ""
+	reqRequiredApprovals = 2
+	reqApprovalRoles = []string{"finance"}
+	reqMustIncludeRoles = []string{"cfo"}
+	reqSeparationOfDuties = true
+	reqFailClosedOnTimeout = true
+	reqStrictPolicy = false
+	reqApprovalCommentRequired = true
+	reqMetadataFile = ""
+	reqResponseSchemaFile = ""
+	reqPolicyContextFile = ""
+	reqToolCallsFile = ""
+	reqSubAgentsFile = ""
+	reqRetrievedContextFile = ""
+	defer func() {
+		reqQuestion = ""
+		reqContext = ""
+		reqAgent = ""
+		reqRisk = ""
+		reqReason = ""
+		reqPriority = ""
+		reqRole = ""
+		reqSLAMinutes = 0
+		reqExternalRequestID = ""
+		reqCorrelationID = ""
+		reqTraceID = ""
+		reqRequiredApprovals = 0
+		reqApprovalRoles = nil
+		reqMustIncludeRoles = nil
+		reqApprovalCommentRequired = false
+	}()
+
+	payload, err := buildCreatePayload()
+	if err != nil {
+		t.Fatalf("buildCreatePayload error: %v", err)
+	}
+	if got := payload["required_role"]; got != "finance" {
+		t.Fatalf("required_role = %v, want finance", got)
+	}
+	if got := payload["sla_minutes"]; got != 10 {
+		t.Fatalf("sla_minutes = %v, want 10", got)
+	}
+	policy := asMap(payload["approval_policy"])
+	if got := policy["mode"]; got != "threshold" {
+		t.Fatalf("approval_policy.mode = %v, want threshold", got)
+	}
+	if got := policy["required_approvals"]; got != 2 {
+		t.Fatalf("approval_policy.required_approvals = %v, want 2", got)
+	}
+	requirements := asMap(payload["approval_requirements"])
+	if got, ok := requirements["required_roles"].([]string); !ok || len(got) != 1 || got[0] != "finance" {
+		t.Fatalf("approval_requirements.required_roles = %v, want [finance]", got)
+	}
+	if got, ok := requirements["must_include_roles"].([]string); !ok || len(got) != 1 || got[0] != "cfo" {
+		t.Fatalf("approval_requirements.must_include_roles = %v, want [cfo]", got)
+	}
+	meta := asMap(payload["metadata"])
+	actor := asMap(meta["actor"])
+	if got := actor["agent_id"]; got != "agt_123" {
+		t.Fatalf("metadata.actor.agent_id = %v, want agt_123", got)
+	}
+}
