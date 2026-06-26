@@ -173,9 +173,22 @@ func newClient() (*client.Client, *config.Profile, error) {
 }
 
 func infof(format string, args ...any) {
-	if !flagQuiet {
-		output.Info(format, args...)
+	if suppressInfo(flagFormat, flagQuiet, os.Getenv("CI") != "") {
+		return
 	}
+
+	output.Info(format, args...)
+}
+
+func suppressInfo(format string, quiet bool, ci bool) bool {
+	if quiet || ci {
+		return true
+	}
+	switch strings.ToLower(format) {
+	case "json", "yaml":
+		return true
+	}
+	return false
 }
 
 // asExit is a tiny errors.As wrapper kept local to avoid importing errors widely.

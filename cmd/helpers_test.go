@@ -60,6 +60,30 @@ func TestClassifyDecision(t *testing.T) {
 	}
 }
 
+func TestSuppressInfo(t *testing.T) {
+	cases := []struct {
+		name   string
+		format string
+		quiet  bool
+		ci     bool
+		want   bool
+	}{
+		{"table", "table", false, false, false},
+		{"empty format", "", false, false, false},
+		{"json", "json", false, false, true},
+		{"yaml", "yaml", false, false, true},
+		{"quiet", "table", true, false, true},
+		{"ci", "table", false, true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := suppressInfo(c.format, c.quiet, c.ci); got != c.want {
+				t.Fatalf("suppressInfo(%q, %v, %v) = %v, want %v", c.format, c.quiet, c.ci, got, c.want)
+			}
+		})
+	}
+}
+
 func TestBuildCreatePayloadAdvancedRouting(t *testing.T) {
 	reqPayloadFile = ""
 	reqType = "approval"

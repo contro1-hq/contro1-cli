@@ -45,15 +45,38 @@ install with the script above or download the latest release archive directly.
 contro1 auth login                 # opens the browser to approve (defaults to api.contro1.com)
 contro1 whoami
 
-contro1 agents register --name "Claude Code - Laptop" --type coding-agent
+AGENT_ID=$(contro1 agents register \
+  --name "Claude Code - Laptop" \
+  --type coding-agent \
+  --quiet \
+  --format json | jq -r .agent_id)
+
 contro1 requests create \
   --type approval \
   --question "Approve sending this customer email?" \
-  --agent agt_123 \
+  --agent "$AGENT_ID" \
   --role support-manager \
   --wait
 
 contro1 evidence for-request <request_id>
+```
+
+PowerShell:
+
+```powershell
+contro1 auth login
+$agent = contro1 agents register `
+  --name "Claude Code - Laptop" `
+  --type coding-agent `
+  --quiet `
+  --format json | ConvertFrom-Json
+
+contro1 requests create `
+  --type approval `
+  --question "Approve sending this customer email?" `
+  --agent $agent.agent_id `
+  --role support-manager `
+  --wait
 ```
 
 The CLI defaults to the hosted Contro1 (`https://api.contro1.com` / `https://contro1.com`),
@@ -63,6 +86,17 @@ so no configuration is needed. To point at a local stack or a self-hosted instan
 contro1 config set api-url http://localhost:8080
 contro1 config set web-url http://localhost:3000
 ```
+
+If `contro1 doctor` points at localhost unexpectedly, check the active profile:
+
+```bash
+contro1 config get api-url
+contro1 config get web-url
+```
+
+The role you pass to `--role` must exist in your organization or be mapped in
+Control Map. If routing fails, run `contro1 requests control-map` with the same
+role/quorum flags to see the missing mapping or capacity warning.
 
 ## What the CLI is for
 
@@ -227,7 +261,8 @@ machine reported after an approved action, not a cryptographic attestation.
 ## Output and exit codes
 
 Every command supports `--format table|json|yaml` (table default for humans, JSON
-default under CI) and `--quiet`.
+default under CI) and `--quiet`. In JSON/YAML mode, status messages are suppressed
+so stdout stays parseable.
 
 ```
 0 ok        1 general      2 bad args   3 auth error
