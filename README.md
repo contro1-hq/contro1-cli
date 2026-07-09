@@ -166,11 +166,13 @@ contro1 ai-registry list
 ## Routing, Control Map and quorum
 
 Use role routing when the request must go to a specific business owner. Use
-Control Map before creating a high-risk request when the agent should know
-whether the role, shift coverage and quorum are currently satisfiable.
+Control Map when the agent or operator wants a routing preview for role
+mapping, shift coverage, fallback reviewers, and quorum. The approval request
+is still the source of truth: create it and wait for the signed decision before
+the action executes.
 
 ```bash
-# Preview who can approve before creating a request
+# Optional preview of who can approve
 contro1 requests control-map \
   --role finance \
   --required-approvals 2 \

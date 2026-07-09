@@ -90,7 +90,7 @@ func init() {
 
 	controlMapCmd := &cobra.Command{
 		Use:   "control-map",
-		Short: "Preview routing, role mapping and quorum before creating a request",
+		Short: "Preview routing, role mapping and quorum for a request",
 		Example: `  contro1 requests control-map --role finance --required-approvals 2 --must-include-role cfo
   contro1 requests control-map --file request.json`,
 		RunE: runRequestControlMap,
