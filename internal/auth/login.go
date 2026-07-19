@@ -29,6 +29,7 @@ type TokenResult struct {
 	OrgName       string
 	Scopes        []string
 	ExpiresAt     string
+	AccessProfile string
 }
 
 func base64url(b []byte) string {
@@ -53,7 +54,7 @@ func pkce() (verifier, challenge string, err error) {
 }
 
 // Login runs the full browser (or manual) login flow and returns a token.
-func Login(pr *config.Profile, deviceName, cliVersion string, noBrowser bool) (*TokenResult, error) {
+func Login(pr *config.Profile, deviceName, cliVersion, accessProfile string, noBrowser bool) (*TokenResult, error) {
 	verifier, challenge, err := pkce()
 	if err != nil {
 		return nil, err
@@ -65,9 +66,9 @@ func Login(pr *config.Profile, deviceName, cliVersion string, noBrowser bool) (*
 
 	var code string
 	if noBrowser {
-		code, err = manualFlow(pr, challenge, state, deviceName)
+		code, err = manualFlow(pr, challenge, state, deviceName, accessProfile)
 	} else {
-		code, err = loopbackFlow(pr, challenge, state, deviceName)
+		code, err = loopbackFlow(pr, challenge, state, deviceName, accessProfile)
 	}
 	if err != nil {
 		return nil, err
@@ -76,7 +77,7 @@ func Login(pr *config.Profile, deviceName, cliVersion string, noBrowser bool) (*
 	return exchange(pr, code, verifier, deviceName, cliVersion)
 }
 
-func loopbackFlow(pr *config.Profile, challenge, state, deviceName string) (string, error) {
+func loopbackFlow(pr *config.Profile, challenge, state, deviceName, accessProfile string) (string, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("starting local server: %w", err)
@@ -118,7 +119,7 @@ func loopbackFlow(pr *config.Profile, challenge, state, deviceName string) (stri
 	go srv.Serve(ln)
 	defer srv.Close()
 
-	authURL := buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, redirect, false)
+	authURL := buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, accessProfile, redirect, false)
 	fmt.Fprintln(os.Stderr, "Opening your browser to authorize the contro1 CLI...")
 	fmt.Fprintln(os.Stderr, "If it does not open, visit:\n  "+authURL)
 	_ = browser.OpenURL(authURL)
@@ -131,8 +132,8 @@ func loopbackFlow(pr *config.Profile, challenge, state, deviceName string) (stri
 	}
 }
 
-func manualFlow(pr *config.Profile, challenge, state, deviceName string) (string, error) {
-	authURL := buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, "", true)
+func manualFlow(pr *config.Profile, challenge, state, deviceName, accessProfile string) (string, error) {
+	authURL := buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, accessProfile, "", true)
 	fmt.Fprintln(os.Stderr, "Open this URL in any browser, approve, then paste the code below:")
 	fmt.Fprintln(os.Stderr, "  "+authURL)
 	fmt.Fprint(os.Stderr, "\nEnter code: ")
@@ -148,12 +149,13 @@ func manualFlow(pr *config.Profile, challenge, state, deviceName string) (string
 	return code, nil
 }
 
-func buildAuthorizeURL(webURL, challenge, state, deviceName, redirect string, manual bool) string {
+func buildAuthorizeURL(webURL, challenge, state, deviceName, accessProfile, redirect string, manual bool) string {
 	u := strings.TrimRight(webURL, "/") + "/cli/authorize"
 	q := url.Values{}
 	q.Set("challenge", challenge)
 	q.Set("state", state)
 	q.Set("name", deviceName)
+	q.Set("access_profile", accessProfile)
 	if manual {
 		q.Set("mode", "manual")
 	} else {
@@ -182,13 +184,14 @@ func exchange(pr *config.Profile, code, verifier, deviceName, cliVersion string)
 	defer resp.Body.Close()
 
 	var body struct {
-		OK    bool `json:"ok"`
-		Data  struct {
-			AccessToken string   `json:"access_token"`
-			TokenID     string   `json:"token_id"`
-			ExpiresAt   string   `json:"expires_at"`
-			Scopes      []string `json:"scopes"`
-			Operator    struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			AccessToken   string   `json:"access_token"`
+			TokenID       string   `json:"token_id"`
+			ExpiresAt     string   `json:"expires_at"`
+			Scopes        []string `json:"scopes"`
+			AccessProfile string   `json:"access_profile"`
+			Operator      struct {
 				Email       string `json:"email"`
 				DisplayName string `json:"display_name"`
 			} `json:"operator"`
@@ -218,6 +221,7 @@ func exchange(pr *config.Profile, code, verifier, deviceName, cliVersion string)
 		OrgName:       body.Data.Org.Name,
 		Scopes:        body.Data.Scopes,
 		ExpiresAt:     body.Data.ExpiresAt,
+		AccessProfile: body.Data.AccessProfile,
 	}, nil
 }
 

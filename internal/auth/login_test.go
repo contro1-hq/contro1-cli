@@ -28,11 +28,11 @@ func TestPKCEChallenge(t *testing.T) {
 }
 
 func TestBuildAuthorizeURL(t *testing.T) {
-	loop := buildAuthorizeURL("http://localhost:3000", "CH", "ST", "dev box", "http://127.0.0.1:5000/callback", false)
-	if !strings.Contains(loop, "challenge=CH") || !strings.Contains(loop, "redirect=") || strings.Contains(loop, "mode=manual") {
+	loop := buildAuthorizeURL("http://localhost:3000", "CH", "ST", "dev box", "agent", "http://127.0.0.1:5000/callback", false)
+	if !strings.Contains(loop, "challenge=CH") || !strings.Contains(loop, "access_profile=agent") || !strings.Contains(loop, "redirect=") || strings.Contains(loop, "mode=manual") {
 		t.Errorf("loopback URL malformed: %s", loop)
 	}
-	manual := buildAuthorizeURL("http://localhost:3000", "CH", "ST", "dev box", "", true)
+	manual := buildAuthorizeURL("http://localhost:3000", "CH", "ST", "dev box", "operator", "", true)
 	if !strings.Contains(manual, "mode=manual") || strings.Contains(manual, "redirect=") {
 		t.Errorf("manual URL malformed: %s", manual)
 	}

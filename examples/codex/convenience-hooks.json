@@ -1,0 +1,18 @@
+{
+  "description": "Developer-controlled Contro1 production deploy gate for Codex.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "contro1 hooks codex --role cto --environment production --target billing-api --setup convenience",
+            "timeout": 910,
+            "statusMessage": "Waiting for production deploy approval"
+          }
+        ]
+      }
+    ]
+  }
+}

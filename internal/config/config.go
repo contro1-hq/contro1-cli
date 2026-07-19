@@ -28,6 +28,8 @@ type Profile struct {
 	OrgName       string   `yaml:"org_name,omitempty"`
 	TokenID       string   `yaml:"token_id,omitempty"`
 	Scopes        []string `yaml:"scopes,omitempty"`
+	AccessProfile string   `yaml:"access_profile,omitempty"`
+	DefaultAgent  string   `yaml:"default_agent_id,omitempty"`
 	OutputFormat  string   `yaml:"output_format,omitempty"`
 }
 
@@ -59,7 +61,7 @@ func path() (string, error) {
 }
 
 func defaultProfile() *Profile {
-	return &Profile{APIURL: DefaultAPIURL, WebURL: DefaultWebURL, OutputFormat: "table"}
+	return &Profile{APIURL: DefaultAPIURL, WebURL: DefaultWebURL, OutputFormat: "table", AccessProfile: "agent"}
 }
 
 // Load reads the config file, seeding sensible defaults when it does not exist.

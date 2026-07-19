@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,6 +25,9 @@ var (
 	runCorrelationID     string
 	runExternalRequestID string
 	runTraceID           string
+	runEnvironment       string
+	runTarget            string
+	runSetup             string
 	runTimeout           time.Duration
 	runRequiresApprove   bool
 )
@@ -52,6 +56,9 @@ context, approver and exit code are recorded as audit-ready evidence.`,
 	runCmd.Flags().StringVar(&runCorrelationID, "correlation-id", "", "case/business id shared across related records")
 	runCmd.Flags().StringVar(&runExternalRequestID, "external-request-id", "", "idempotency key for this external action")
 	runCmd.Flags().StringVar(&runTraceID, "trace-id", "", "trace id, e.g. trc_run_123")
+	runCmd.Flags().StringVar(&runEnvironment, "environment", "", "environment shown to the reviewer, e.g. production")
+	runCmd.Flags().StringVar(&runTarget, "target", "", "service, cluster, account, or other action target")
+	runCmd.Flags().StringVar(&runSetup, "setup", "convenience", "gate label: convenience|enterprise")
 	runCmd.Flags().DurationVar(&runTimeout, "timeout", 15*time.Minute, "max time to wait for approval")
 	runCmd.Flags().BoolVar(&runRequiresApprove, "requires-approval", true, "require approval before running (always on in v1)")
 
@@ -64,19 +71,34 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return output.Errf(output.CodeBadArgs, "provide the command after '--', e.g. contro1 run -- npm run deploy")
 	}
 	command := args[dash:]
-	cmdStr := strings.Join(command, " ")
+	safeCommand := redactCommandArgs(command)
+	safeCmdStr := strings.Join(safeCommand, " ")
+	safeReason := redactSecretText(runReason)
+	if runType != "approval" {
+		return output.Errf(output.CodeBadArgs, "contro1 run supports --type approval only")
+	}
 
 	c, pr, err := newClient()
 	if err != nil {
 		return err
 	}
+	if runAgent == "" {
+		runAgent = pr.DefaultAgent
+	}
 
 	cwd, _ := os.Getwd()
 	gitBranch := gitOutput("rev-parse", "--abbrev-ref", "HEAD")
 	gitCommit := gitOutput("rev-parse", "HEAD")
+	workspaceState := gitOutput("status", "--porcelain=v1", "--untracked-files=normal")
+	workspaceStateHash := sha256Hex(workspaceState)
+	encodedCommand, _ := json.Marshal(command)
+	commandHash := sha256Hex(string(encodedCommand))
+	if runSetup != "convenience" && runSetup != "enterprise" {
+		return output.Errf(output.CodeBadArgs, "--setup must be convenience or enterprise")
+	}
 
 	// 1) create approval request
-	contextLines := []string{"Command: " + cmdStr, "Working dir: " + cwd}
+	contextLines := []string{"Command: " + safeCmdStr, "Working dir: " + cwd}
 	if gitBranch != "" {
 		contextLines = append(contextLines, "Git branch: "+gitBranch)
 	}
@@ -84,26 +106,53 @@ func runRun(cmd *cobra.Command, args []string) error {
 		contextLines = append(contextLines, "Git commit: "+gitCommit)
 	}
 	if runReason != "" {
-		contextLines = append(contextLines, "Reason: "+runReason)
+		contextLines = append(contextLines, "Reason: "+safeReason)
 	}
 
-	meta := map[string]any{"source": "cli", "run": map[string]any{"command": cmdStr, "cwd": cwd, "git_branch": gitBranch, "git_commit": gitCommit}}
-	if runAgent != "" {
-		meta["actor"] = map[string]any{"agent_id": runAgent}
+	// Canonical protocol request: machine-observed facts and agent-reported text
+	// stay separate so routing never depends on the model's own justification.
+	machineObserved := map[string]any{
+		"command": safeCmdStr, "command_sha256": commandHash, "cwd": cwd,
+		"git_branch": gitBranch, "git_commit": gitCommit,
+		"workspace_state_hash": workspaceStateHash, "environment": runEnvironment,
+		"target": runTarget, "enforcement_setup": runSetup,
+	}
+	context := map[string]any{
+		"action":           map[string]any{"tool": "shell", "input": map[string]any{"command": safeCmdStr, "argv": safeCommand}},
+		"summary":          "A local command is blocked until the routed human approval resolves.",
+		"machine_observed": machineObserved,
+	}
+	if runEnvironment != "" {
+		context["environment"] = runEnvironment
+	}
+	if runTarget != "" {
+		context["resource"] = runTarget
+	}
+	if runReason != "" {
+		context["agent_reported"] = map[string]any{"justification": safeReason}
+	}
+	source := map[string]any{"integration": "contro1-cli", "framework": "command-runner"}
+	if runID := firstString(runExternalRequestID, runTraceID); runID != "" {
+		source["run_id"] = runID
 	}
 	payload := map[string]any{
-		"type":       runType,
-		"question":   "Approve running: " + truncate(cmdStr, 120),
-		"context":    strings.Join(contextLines, "\n"),
-		"priority":   "urgent",
-		"risk_level": runRisk,
-		"metadata":   meta,
+		"title":       "Approve running: " + truncate(safeCmdStr, 120),
+		"description": strings.Join(contextLines, "\n"), "request_type": runType,
+		"source": source, "context": context,
+		"continuation": map[string]any{"mode": "decision", "expires_at": time.Now().Add(runTimeout).UTC().Format(time.RFC3339)},
+		"risk_level":   runRisk,
+		"metadata":     map[string]any{"source": "cli", "executor_wait_until": time.Now().Add(runTimeout).UTC().Format(time.RFC3339), "enforcement_setup": runSetup},
 	}
+	routing := map[string]any{"priority": "urgent"}
 	if runRole != "" {
-		payload["required_role"] = runRole
+		routing["required_role"] = runRole
 	}
 	if runSLAMinutes > 0 {
-		payload["sla_minutes"] = runSLAMinutes
+		routing["sla_minutes"] = runSLAMinutes
+	}
+	payload["routing"] = routing
+	if runAgent != "" {
+		payload["actor"] = map[string]any{"agent_id": runAgent}
 	}
 	if runCorrelationID != "" {
 		payload["correlation_id"] = runCorrelationID
@@ -115,7 +164,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		payload["trace_id"] = runTraceID
 	}
 	if runReason != "" {
-		payload["policy_trigger"] = runReason
+		payload["policy_trigger"] = safeReason
+		payload["policy_context"] = map[string]any{
+			"source": "contro1-cli", "policy_name": "command-approval",
+			"rule_id": "command.requires-human-authorization", "rule_reason": safeReason,
+			"enforcement": runSetup,
+		}
 	}
 	attachRunApprovalFields(payload)
 
@@ -133,25 +187,38 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if decision != "approved" {
 		// record the (non-execution) outcome too
-		recordRunEvidence(c, reqID, cmdStr, cwd, gitBranch, gitCommit, nil, time.Now(), time.Now())
+		recordRunEvidence(c, reqID, safeCmdStr, cwd, gitBranch, gitCommit, commandHash, workspaceStateHash, workspaceStateHash, "not_executed_"+decision, nil, time.Now(), time.Now())
+		if decision == "timeout" {
+			// The CLI gave up waiting, but the request is still open server-side. Tell the
+			// server the executor is gone: the request keeps escalating for the humans while a
+			// later approval is not mistaken for a command that actually ran.
+			recordExecutorDetached(c, reqID, safeCmdStr)
+		}
 		return finishDecision(pr, final, decision)
 	}
 
 	approver := approverName(final)
-	infof("Approved%s. Running: %s", approverSuffix(approver), cmdStr)
+	actualCommit := gitOutput("rev-parse", "HEAD")
+	actualWorkspaceHash := sha256Hex(gitOutput("status", "--porcelain=v1", "--untracked-files=normal"))
+	if actualCommit != gitCommit || actualWorkspaceHash != workspaceStateHash {
+		now := time.Now()
+		recordRunEvidence(c, reqID, safeCmdStr, cwd, gitBranch, gitCommit, commandHash, workspaceStateHash, actualWorkspaceHash, "not_executed_workspace_changed", nil, now, now)
+		return output.Errf(output.CodeGeneral, "workspace changed after approval; command was not run (create a new approval for the new state)")
+	}
+	infof("Approved%s. Running the command bound to the reviewed hash: %s", approverSuffix(approver), safeCmdStr)
 
 	// 3) execute
 	started := time.Now()
-	exitCode := execCommand(command)
+	exitCode := execCommand(command, outFormat(pr) != "table")
 	finished := time.Now()
 
 	// 4) store evidence
-	evidenceID := recordRunEvidence(c, reqID, cmdStr, cwd, gitBranch, gitCommit, &exitCode, started, finished)
+	evidenceID := recordRunEvidence(c, reqID, safeCmdStr, cwd, gitBranch, gitCommit, commandHash, workspaceStateHash, actualWorkspaceHash, "executed", &exitCode, started, finished)
 
 	result := map[string]any{
 		"request_id":  reqID,
 		"status":      "approved",
-		"command":     cmdStr,
+		"command":     safeCmdStr,
 		"exit_code":   exitCode,
 		"evidence_id": evidenceID,
 	}
@@ -170,9 +237,32 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func execCommand(command []string) int {
+func redactCommandArgs(command []string) []string {
+	redacted := make([]string, len(command))
+	copy(redacted, command)
+	redactNext := false
+	for i, arg := range redacted {
+		if redactNext {
+			redacted[i] = "[REDACTED]"
+			redactNext = false
+			continue
+		}
+		redacted[i] = redactSecretText(arg)
+		flag := strings.TrimLeft(strings.SplitN(arg, "=", 2)[0], "-")
+		if !strings.Contains(arg, "=") && secretFieldPattern.MatchString(flag) {
+			redactNext = true
+		}
+	}
+	return redacted
+}
+
+func execCommand(command []string, structuredOutput bool) int {
 	c := exec.Command(command[0], command[1:]...)
-	c.Stdout = os.Stdout
+	if structuredOutput {
+		c.Stdout = os.Stderr
+	} else {
+		c.Stdout = os.Stdout
+	}
 	c.Stderr = os.Stderr
 	c.Stdin = os.Stdin
 	if err := c.Run(); err != nil {
@@ -185,16 +275,14 @@ func execCommand(command []string) int {
 	return 0
 }
 
-func recordRunEvidence(c *client.Client, reqID, command, cwd, branch, commit string, exitCode *int, started, finished time.Time) string {
+func recordRunEvidence(c *client.Client, reqID, command, cwd, branch, commit, commandHash, expectedWorkspaceHash, actualWorkspaceHash, executionStatus string, exitCode *int, started, finished time.Time) string {
 	body := map[string]any{
-		"request_id":  reqID,
-		"command":     command,
-		"cwd":         cwd,
-		"git_branch":  branch,
-		"git_commit":  commit,
-		"agent_id":    runAgent,
-		"started_at":  started.UTC().Format(time.RFC3339),
-		"finished_at": finished.UTC().Format(time.RFC3339),
+		"request_id": reqID, "command": command, "command_sha256": commandHash,
+		"cwd": cwd, "git_branch": branch, "git_commit": commit,
+		"expected_workspace_hash": expectedWorkspaceHash, "actual_workspace_hash": actualWorkspaceHash,
+		"execution_status": executionStatus, "environment": runEnvironment, "target": runTarget,
+		"enforcement_setup": runSetup, "agent_id": runAgent,
+		"started_at": started.UTC().Format(time.RFC3339), "finished_at": finished.UTC().Format(time.RFC3339),
 	}
 	if exitCode != nil {
 		body["exit_code"] = *exitCode
@@ -204,6 +292,20 @@ func recordRunEvidence(c *client.Client, reqID, command, cwd, branch, commit str
 		return ""
 	}
 	return str(asMap(resp["data"])["evidence_id"])
+}
+
+// recordExecutorDetached notifies the server that the CLI stopped waiting (client-side
+// timeout) before a decision was made. It never cancels the request, so SLA escalation and
+// queue visibility continue. Best-effort: the CLI returns the timeout error regardless.
+func recordExecutorDetached(c *client.Client, reqID, command string) {
+	body := map[string]any{
+		"request_id":     reqID,
+		"reason":         "cli_wait_timeout",
+		"waited_seconds": int(runTimeout.Seconds()),
+		"command":        command,
+		"agent_id":       runAgent,
+	}
+	_, _ = c.Do("POST", "/api/centcom/v1/cli/executor-detached", body)
 }
 
 func attachRunApprovalFields(payload map[string]any) {

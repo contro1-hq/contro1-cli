@@ -44,6 +44,7 @@ var (
 	reqStrictPolicy            bool
 	reqApprovalCommentRequired bool
 	reqWait                    bool
+	reqDryRun                  bool
 
 	reqListState  string
 	reqListAgent  string
@@ -81,6 +82,7 @@ func init() {
 	createCmd.Flags().StringVar(&reqCallbackURL, "callback-url", "", "webhook callback URL")
 	addAdvancedRequestFlags(createCmd)
 	createCmd.Flags().BoolVar(&reqWait, "wait", false, "wait for the decision after creating")
+	createCmd.Flags().BoolVar(&reqDryRun, "dry-run", false, "print the canonical request body without sending it")
 
 	listCmd := &cobra.Command{Use: "list", Short: "List recent requests", RunE: runRequestList}
 	listCmd.Flags().StringVar(&reqListState, "state", "", "filter by state")
@@ -215,11 +217,19 @@ func buildCreatePayload() (map[string]any, error) {
 }
 
 func runRequestCreate(_ *cobra.Command, _ []string) error {
-	c, pr, err := newClient()
+	payload, err := buildCreatePayload()
 	if err != nil {
 		return err
 	}
-	payload, err := buildCreatePayload()
+	_, pr, _, err := loadCtx()
+	if err != nil {
+		return err
+	}
+	applyDefaultAgent(payload, pr)
+	if reqDryRun {
+		return output.Render(outFormat(pr), payload, nil)
+	}
+	c, pr, err := newClient()
 	if err != nil {
 		return err
 	}
@@ -238,6 +248,17 @@ func runRequestCreate(_ *cobra.Command, _ []string) error {
 		return finishDecision(pr, final, decision)
 	}
 	return output.Render(outFormat(pr), resp, requestSummaryTable(resp))
+}
+
+func applyDefaultAgent(payload map[string]any, pr *config.Profile) {
+	if pr == nil || pr.DefaultAgent == "" {
+		return
+	}
+	meta := asMap(payload["metadata"])
+	if _, exists := meta["actor"]; !exists {
+		meta["actor"] = map[string]any{"agent_id": pr.DefaultAgent}
+		payload["metadata"] = meta
+	}
 }
 
 func runRequestControlMap(_ *cobra.Command, _ []string) error {

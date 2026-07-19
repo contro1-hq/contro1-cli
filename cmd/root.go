@@ -49,9 +49,9 @@ before it runs.
 
 Get started:
   contro1 auth login
-  contro1 whoami
-  contro1 agents register --name "Claude Code - Laptop" --type coding-agent
-  contro1 requests create --type approval --question "Approve this action?" --agent agt_123 --wait`,
+  contro1 init --name "Claude Code - Laptop"
+  contro1 requests create --type approval --question "Approve this action?" --wait
+  contro1 ask "Which region should I use?" --wait --format json`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 }
@@ -160,6 +160,9 @@ func newClient() (*client.Client, *config.Profile, error) {
 	_, pr, name, err := loadCtx()
 	if err != nil {
 		return nil, nil, err
+	}
+	if pr.AccessProfile == "operator" && os.Getenv("CONTRO1_TOKEN") != "" {
+		return nil, nil, output.Errf(output.CodeAuth, "operator mode requires an interactive browser-issued profile; CONTRO1_TOKEN is only supported for agent/CI use")
 	}
 	apiURL := pr.APIURL
 	if flagAPIURL != "" {

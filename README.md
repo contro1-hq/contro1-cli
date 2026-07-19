@@ -42,41 +42,17 @@ install with the script above or download the latest release archive directly.
 ## Quick start
 
 ```bash
-contro1 auth login                 # opens the browser to approve (defaults to api.contro1.com)
-contro1 whoami
-
-AGENT_ID=$(contro1 agents register \
-  --name "Claude Code - Laptop" \
-  --type coding-agent \
-  --quiet \
-  --format json | jq -r .agent_id)
-
+contro1 auth login --mode agent    # safe developer profile; browser + PKCE
+contro1 init --name "Claude Code - Laptop"
 contro1 requests create \
   --type approval \
   --question "Approve sending this customer email?" \
-  --agent "$AGENT_ID" \
   --role support-manager \
   --wait
 
+contro1 ask "Which region should I use?" --wait --format json
+
 contro1 evidence for-request <request_id>
-```
-
-PowerShell:
-
-```powershell
-contro1 auth login
-$agent = contro1 agents register `
-  --name "Claude Code - Laptop" `
-  --type coding-agent `
-  --quiet `
-  --format json | ConvertFrom-Json
-
-contro1 requests create `
-  --type approval `
-  --question "Approve sending this customer email?" `
-  --agent $agent.agent_id `
-  --role support-manager `
-  --wait
 ```
 
 The CLI defaults to the hosted Contro1 (`https://api.contro1.com` / `https://contro1.com`),
@@ -86,17 +62,6 @@ so no configuration is needed. To point at a local stack or a self-hosted instan
 contro1 config set api-url http://localhost:8080
 contro1 config set web-url http://localhost:3000
 ```
-
-If `contro1 doctor` points at localhost unexpectedly, check the active profile:
-
-```bash
-contro1 config get api-url
-contro1 config get web-url
-```
-
-The role you pass to `--role` must exist in your organization or be mapped in
-Control Map. If routing fails, run `contro1 requests control-map` with the same
-role/quorum flags to see the missing mapping or capacity warning.
 
 ## What the CLI is for
 
@@ -123,14 +88,18 @@ SDK/API integration.
 Headless machines: `contro1 auth login --no-browser` prints a URL to approve on any
 device, then you paste the one-time code back.
 
-CI: set `CONTRO1_TOKEN=cco_cli_live_...` to skip the keychain entirely. Output also
-defaults to JSON when `CI` is set.
+CI may use an agent `CONTRO1_TOKEN`. Operator profiles are browser-issued, expire
+after 8 hours, require an interactive TTY for decisions, and cannot use that env var.
+
+- `agent` (default): register/read self; create, read, wait for and cancel its own requests; related evidence/traces.
+- `operator`: routed queue, atomic claim, and approve/reject/respond after assignment.
+- `observer`: read-only organization, registry, evidence, and integration status.
 
 ## Command groups
 
 ```
 Core:              auth  config  whoami  doctor  scopes
-Agent workflows:   agents  requests  run  evidence  traces  ai-registry
+Agent workflows:   init  ask  agents  requests  run  hooks  evidence  traces
 Read-only admin:   org  api-keys  webhooks  integrations
 Operator queue:    queue
 ```
@@ -140,9 +109,8 @@ Run `contro1 help` for the grouped list, or `contro1 <topic> --help` for details
 ## Agent workflow
 
 ```bash
-# Register an agent once
-contro1 agents register --name "Support Agent" --type custom-agent
-contro1 agents list
+# Register an agent once and save it as the profile default
+contro1 init --name "Support Agent" --framework custom-agent
 
 # Ask a human before the agent acts
 contro1 requests create \
@@ -158,9 +126,8 @@ contro1 requests create \
 contro1 evidence for-request <request_id>
 contro1 traces for-request <request_id>
 
-# Keep inventory current
-contro1 ai-registry import ./inventory.json
-contro1 ai-registry list
+# Ask for human input (a free_text request)
+contro1 ask "Which customer segment should I use?" --wait
 ```
 
 ## Routing, Control Map and quorum
@@ -198,6 +165,16 @@ contro1 requests create \
   --wait
 ```
 
+`--reason` and `--context` answer different questions. `--reason` records why approval
+is required - the policy trigger, for example "Payment exceeds autonomous limit".
+`--context` carries what the reviewer needs to decide - fill it at the gate with
+machine-observed facts: the redacted command or tool input plus hashes of the
+original values, and the message or event that
+triggered the run. Anything the agent writes about its own justification is
+agent-reported: it helps the human decide, but it must never be the thing that changes
+routing, risk level, or approval policy. See the full pattern at
+https://contro1.com/docs/requests-api.
+
 Useful non-admin request flags:
 
 ```
@@ -218,6 +195,11 @@ Useful non-admin request flags:
 --parent-trace-id <trc_...>       parent trace for sub-agent runs
 ```
 
+Set any agent, framework, or CLI wait timeout longer than `--sla-minutes` plus a
+small callback/escalation buffer. For example, a request with `--sla-minutes 10`
+should use a wait timeout above 10 minutes, so the local agent run does not
+auto-cancel or detach before Contro1 reaches the SLA outcome.
+
 For payloads that already match the public API, pass JSON directly. This is the
 best path for advanced protocol fields, response schemas, tool calls,
 sub-agents, retrieved context, or policy objects that should stay versioned in
@@ -225,7 +207,8 @@ your agent repo.
 
 ```bash
 contro1 requests control-map --file request.json --format json
-contro1 requests create --file request.json --wait
+contro1 requests create --file request.json --dry-run --format json
+contro1 requests create --file request.json --wait --format json
 ```
 
 You can also attach structured JSON fragments without writing the full body:
@@ -241,13 +224,21 @@ contro1 requests create \
   --wait
 ```
 
-## Optional command gating
+## Production deploy gate
 
-For coding agents and developer workflows, `contro1 run` asks for approval, waits
-for the decision, and only runs the local command if approved.
+For coding agents and developer workflows, `contro1 run` sends a canonical
+approval request, waits for the decision, verifies that the repository state did
+not change while it was waiting, and only then runs the original argv bound to
+the reviewed hash. Secret-looking values are redacted from reviewer context.
 
 ```bash
-contro1 run --requires-approval -- npm run deploy
+contro1 run \
+  --role cto \
+  --risk critical \
+  --environment production \
+  --target billing-api \
+  --reason "Production deploys require CTO authorization" \
+  -- npm run deploy:production
 contro1 run \
   --agent agt_123 \
   --role release-manager \
@@ -260,11 +251,46 @@ contro1 run \
 The execution evidence is marked `client-reported`: it records what the local
 machine reported after an approved action, not a cryptographic attestation.
 
+Try the safe [production deploy demo](examples/production-deploy/README.md).
+
+## Codex adapter
+
+`contro1 hooks codex` reads a Codex `PreToolUse` or `PermissionRequest` event
+from stdin. It gates deploy-like Bash commands and declines to decide on normal
+tests, reads, and local development commands.
+
+For a developer-controlled setup, copy
+[`examples/codex/convenience-hooks.json`](examples/codex/convenience-hooks.json)
+to a trusted project `.codex/hooks.json`, then use `/hooks` in Codex to review
+and trust it.
+
+For an organization-controlled setup, deploy
+[`examples/codex/requirements.toml`](examples/codex/requirements.toml) through
+your supported managed configuration channel and install the CLI at the absolute
+path referenced by the managed hook. The adapter fails closed on invalid policy,
+authentication failure, rejection, timeout, and Contro1 API failure.
+
+## Convenience versus non-bypassable enforcement
+
+| Setup | Protects against | What can still bypass it |
+|---|---|---|
+| `contro1 run` or a project hook | Accidental/autonomous agent actions | Running the deploy command directly or editing local config |
+| Centrally managed Claude Code/Codex hook | Bypass inside that managed coding-agent client | Another terminal or tool with production credentials |
+| CI/deployment credential boundary | Agent and developer paths without authorized credentials | Changes to the protected CI/deployment policy itself |
+
+The strongest pattern is two jobs: an approval job with only a scoped Contro1
+agent token, followed by a deploy job that obtains short-lived production
+credentials only after approval. Start from the
+[GitHub Actions template](examples/github-actions/production-deploy.yml).
+
+Do not market a wrapper or project-local hook as a security boundary. It is a
+valuable convenience gate. Non-bypassable enforcement requires managed client
+policy plus a target-side credential boundary.
+
 ## Output and exit codes
 
 Every command supports `--format table|json|yaml` (table default for humans, JSON
-default under CI) and `--quiet`. In JSON/YAML mode, status messages are suppressed
-so stdout stays parseable.
+default under CI) and `--quiet`.
 
 ```
 0 ok        1 general      2 bad args   3 auth error
@@ -272,22 +298,45 @@ so stdout stays parseable.
 6 timeout                  7 network error
 ```
 
-## Token scopes (v1 default)
+On a `contro1 run` timeout (exit 6) the command never executes. The CLI's `--timeout`
+is the executor's patience, not the request's lifecycle: the request is left open
+server-side so it keeps escalating to the humans and stays fully documented. The CLI
+records an `executor_detached` event on it, so a later human approval is never mistaken
+for a command that actually ran.
+
+For approval gates with an SLA, keep `--timeout` greater than `--sla-minutes` so
+the command runner does not give up before the approval window and escalation path
+have had time to finish.
+
+## Operator queue
+
+Queue decisions require a separate interactive operator profile:
+
+```bash
+contro1 auth login --mode operator --profile reviewer
+contro1 queue claim <request_id> --profile reviewer
+contro1 queue approve <request_id> --profile reviewer
+contro1 queue reject <request_id> --comment "policy mismatch" --profile reviewer
+contro1 queue respond <request_id> --value "us-east-1" --profile reviewer
+```
+
+Comment requirements are snapshotted from the API-key policy (`optional`,
+`risk_based`, or `always`) when the request is created.
+
+## Agent token scopes
 
 ```
-operator:me:read  org:read
 agents:read  agents:register  agents:trail:read
-requests:create  requests:read  requests:wait  requests:cancel_own  requests:respond_if_assigned
+requests:create  requests:read  requests:wait  requests:cancel_own
 evidence:read  traces:read
-ai_registry:read  ai_registry:import
-api_keys:read  webhooks:read  integrations:read  queue:read
 ```
 
 `requests:cancel_own` lets a CLI token cancel only requests it created (each request is
 tagged with the creating token id). Full token management (listing/revoking other tokens)
 is a dashboard action - a CLI token can only revoke itself.
 
-Tokens expire after 90 days and can be revoked from `contro1 auth tokens revoke <id>`
+Agent/observer tokens expire after 90 days; operator tokens expire after 8 hours.
+Tokens can be revoked from `contro1 auth tokens revoke <id>`
 or the dashboard (Settings -> APIs & Webhooks -> CLI Access Tokens).
 
 ## Testing

@@ -15,6 +15,7 @@ var (
 	loginNoBrowser bool
 	loginName      string
 	loginPlaintext bool
+	loginMode      string
 	printTokenYes  bool
 	whoamiScopes   bool
 )
@@ -37,6 +38,7 @@ func init() {
 	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "print a URL to approve on another device instead of opening a browser")
 	loginCmd.Flags().StringVar(&loginName, "name", "", "device/token name (defaults to hostname)")
 	loginCmd.Flags().BoolVar(&loginPlaintext, "allow-plaintext-token-store", false, "store the token in a 0600 file instead of the OS keychain")
+	loginCmd.Flags().StringVar(&loginMode, "mode", "agent", "access profile: agent|operator|observer")
 
 	logoutCmd := &cobra.Command{
 		Use:   "logout",
@@ -98,7 +100,10 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	res, err := auth.Login(pr, device, Version, loginNoBrowser)
+	if loginMode != "agent" && loginMode != "operator" && loginMode != "observer" {
+		return output.Errf(output.CodeBadArgs, "--mode must be agent, operator, or observer")
+	}
+	res, err := auth.Login(pr, device, Version, loginMode, loginNoBrowser)
 	if err != nil {
 		return output.Errf(output.CodeAuth, "%v", err)
 	}
@@ -111,12 +116,13 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	pr.OrgName = res.OrgName
 	pr.TokenID = res.TokenID
 	pr.Scopes = res.Scopes
+	pr.AccessProfile = res.AccessProfile
 	if err := cfg.Save(); err != nil {
 		return output.Errf(output.CodeGeneral, "saving config: %v", err)
 	}
 
 	infof("Logged in as %s (Org: %s)", res.OperatorEmail, res.OrgName)
-	infof("Token stored for profile %q. Scopes: %d. Expires: %s", name, len(res.Scopes), res.ExpiresAt)
+	infof("Token stored for profile %q (%s). Scopes: %d. Expires: %s", name, res.AccessProfile, len(res.Scopes), res.ExpiresAt)
 	return nil
 }
 
@@ -132,7 +138,7 @@ func runLogout(_ *cobra.Command, _ []string) error {
 		}
 	}
 	_ = keychain.Delete(name)
-	pr.OperatorEmail, pr.OrgName, pr.TokenID, pr.Scopes = "", "", "", nil
+	pr.OperatorEmail, pr.OrgName, pr.TokenID, pr.Scopes, pr.AccessProfile = "", "", "", nil, ""
 	_ = cfg.Save()
 	infof("Logged out of profile %q.", name)
 	return nil
@@ -148,8 +154,11 @@ func runWhoami(_ *cobra.Command, _ []string) error {
 		return err
 	}
 	data := client.Data(resp)
+	authm := asMap(asMap(data)["auth"])
+	if str(authm["access_profile"]) == "legacy" || str(authm["legacy_relogin_required"]) == "true" {
+		infof("Warning: this is a legacy CLI token. Re-login with --mode agent, operator, or observer before it expires.")
+	}
 	if whoamiScopes && outFormat(pr) == "table" {
-		authm := asMap(asMap(data)["auth"])
 		for _, s := range asSlice(authm["scopes"]) {
 			output.Info("  %s", str(s))
 		}
@@ -192,9 +201,12 @@ func runTokensRevoke(_ *cobra.Command, args []string) error {
 }
 
 func runPrintToken(_ *cobra.Command, _ []string) error {
-	_, _, name, err := loadCtx()
+	_, pr, name, err := loadCtx()
 	if err != nil {
 		return err
+	}
+	if pr.AccessProfile == "operator" {
+		return output.Errf(output.CodeAuth, "operator tokens are short-lived human sessions and cannot be exported")
 	}
 	tok, err := resolveToken(name)
 	if err != nil {
@@ -232,6 +244,7 @@ func whoamiTable(data any) *output.Table {
 			{"operator", str(op["email"])},
 			{"org", str(org["name"])},
 			{"auth_type", str(authm["type"])},
+			{"access_profile", str(authm["access_profile"])},
 			{"scopes", fmt.Sprintf("%d", len(asSlice(authm["scopes"])))},
 		},
 	}

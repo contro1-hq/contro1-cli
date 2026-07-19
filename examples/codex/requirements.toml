@@ -1,0 +1,24 @@
+# Enterprise-managed Codex requirements. Install this file through your
+# supported system/cloud/MDM policy channel, and install the Contro1 binary at
+# the absolute path referenced below.
+
+allow_managed_hooks_only = true
+allowed_approval_policies = ["on-request"]
+allowed_sandbox_modes = ["read-only", "workspace-write"]
+
+[features]
+hooks = true
+
+[hooks]
+managed_dir = "/opt/contro1/hooks"
+windows_managed_dir = 'C:\Program Files\Contro1\hooks'
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/contro1 hooks codex --role cto --environment production --setup enterprise"
+command_windows = 'C:\Program Files\Contro1\contro1.exe hooks codex --role cto --environment production --setup enterprise'
+timeout = 910
+statusMessage = "Waiting for enterprise production deploy approval"
