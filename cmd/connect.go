@@ -148,6 +148,16 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if flagConnectTest {
 		return runDoctorPlatform(cmd, platform)
 	}
+	if invoker := sudoInvoker(); invoker != "" {
+		// Run as root, connect would record root as the only identity allowed
+		// to reach the agents, keep its state where the person cannot resume
+		// it, and run the platform CLI without their PATH. It asks for
+		// administrator approval itself, for the one step that needs it.
+		ns := runtimeproto.NextStep{SchemaVersion: runtimeproto.SchemaVersion, State: runtimeproto.StateBlocked, Platform: platform,
+			Message:     "Run contro1 connect as " + invoker + ", without sudo. It asks for administrator approval itself when it sets up the Contro1 service.",
+			NextCommand: "contro1 connect " + platform}
+		return renderNextStep(ns)
+	}
 	c, pr, err := newClient()
 	if err != nil {
 		ns := runtimeproto.NextStep{SchemaVersion: runtimeproto.SchemaVersion, State: runtimeproto.StateBlocked, Platform: platform, Message: "Sign in to Contro1 on this computer first.", NextCommand: "contro1 auth login"}
@@ -171,7 +181,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	ns := o.Run(ctx, connect.Options{
 		Platform: platform, APIURL: strings.TrimRight(apiURL, "/"), Owner: flagConnectOwner, Resume: flagConnectResume,
 		NoWait: flagConnectNoWait, Yes: flagConnectYes, ConfirmRoles: flagConnectConfirmRoles, Development: flagConnectDevelopment,
-		Repair: flagConnectRepair, HostLabel: host, HostOS: runtime.GOOS, HostArch: runtime.GOARCH, WaitTimeout: 11 * time.Minute,
+		Repair: flagConnectRepair, Principal: flagConnectPrincipal, HostLabel: host, HostOS: runtime.GOOS, HostArch: runtime.GOARCH, WaitTimeout: 11 * time.Minute,
 	})
 	return renderNextStep(ns)
 }

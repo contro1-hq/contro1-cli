@@ -166,9 +166,6 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 			return nil, err
 		}
 	} else {
-		if runtime.GOOS != "windows" {
-			return nil, installer.ErrNeedsElevation
-		}
 		args := []string{"broker", "register", "--phase-file", path}
 		if apiURL != "" {
 			args = append(args, "--api-url", apiURL)
@@ -193,6 +190,17 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 		return nil, errors.New(done.Error)
 	}
 	return done.Results, nil
+}
+
+// SetPrincipals changes who may reach existing endpoints, through the same one
+// elevated step as registration (control is administrators only).
+func (s *serviceBroker) SetPrincipals(ctx context.Context, apiURL string, updates []broker.ControlPrincipalUpdate) error {
+	if s.development {
+		_, err := controlCall(ctx, s.layout, "POST", "/control/v1/principals", map[string]any{"updates": updates})
+		return err
+	}
+	_, err := s.Register(ctx, apiURL, broker.ControlConnectionsRequest{APIURL: apiURL, PrincipalUpdates: updates})
+	return err
 }
 
 // connectPhase is the only file that carries the connection ticket, for at
@@ -257,6 +265,10 @@ func runRegisterPhase(ctx context.Context, path string) error {
 		if _, err := installer.Apply(plan, installer.SystemRunner{}, filepath.Join(layout.StateDir, "install-journal.json")); err != nil {
 			return finish(nil, err)
 		}
+	}
+	if len(phase.Request.PrincipalUpdates) > 0 {
+		_, err := controlCall(ctx, layout, "POST", "/control/v1/principals", map[string]any{"updates": phase.Request.PrincipalUpdates})
+		return finish(nil, err)
 	}
 	deadline := time.Now().Add(45 * time.Second)
 	for {
@@ -369,6 +381,10 @@ type terminalPrompt struct{ json bool }
 
 func (p terminalPrompt) Interactive() bool {
 	return !p.json && isTerminal(os.Stdin) && isTerminal(os.Stderr)
+}
+
+func (p terminalPrompt) Terminal() bool {
+	return isTerminal(os.Stdin)
 }
 
 func (p terminalPrompt) Confirm(title string, lines []string) bool {

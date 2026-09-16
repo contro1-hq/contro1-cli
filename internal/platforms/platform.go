@@ -121,7 +121,7 @@ func currentPrincipal(override string) (string, error) {
 	if override != "" {
 		return override, nil
 	}
-	id, err := localipc.CurrentIdentity()
+	id, err := localipc.InvokingIdentity()
 	if err != nil {
 		return "", err
 	}

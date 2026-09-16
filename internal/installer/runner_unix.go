@@ -118,11 +118,57 @@ func run(name string, args ...string) error {
 	return nil
 }
 
-// RunElevated is not used on unix: the command asks the person to re-run with sudo.
-func RunElevated([]string) (int, error) { return -1, ErrNeedsElevation }
+// RunElevated runs only the service setup step as root, through sudo. The rest
+// of contro1 connect stays the person who ran it, so the connection state, the
+// platform CLI and the identity allowed to reach each endpoint are theirs and
+// not root's.
+//
+// With cached sudo credentials it runs without a prompt. Without them it asks
+// for the password at the terminal; with no terminal (an agent) it returns
+// ErrNeedsElevation and the caller hands back a command a person runs.
+func RunElevated(args []string) (int, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return -1, err
+	}
+	sudo, err := exec.LookPath("sudo")
+	if err != nil {
+		return -1, ErrNeedsElevation
+	}
+	argv := append([]string{"--", exe}, args...)
+	if exec.Command(sudo, "-n", "true").Run() == nil {
+		cmd := exec.Command(sudo, append([]string{"-n"}, argv...)...)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		return exitCode(cmd.Run())
+	}
+	if info, err := os.Stdin.Stat(); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return -1, ErrNeedsElevation
+	}
+	fmt.Fprintln(os.Stderr, "Setting up the Contro1 service needs administrator approval (sudo).")
+	cmd := exec.Command(sudo, argv...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stderr, os.Stderr
+	code, err := exitCode(cmd.Run())
+	if err == nil && code == 1 {
+		// sudo's own exit status for a refused or failed authentication.
+		return code, ErrElevationDeclined
+	}
+	return code, err
+}
 
-// SudoHint builds the next command for a person at the terminal.
-func SudoHint(command string) string { return "sudo " + command }
+func exitCode(err error) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), nil
+	}
+	return -1, err
+}
+
+// SudoHint builds the next command when no terminal can answer a sudo prompt:
+// a person caches their credentials once, then the same command runs through.
+func SudoHint(command string) string { return "sudo -v && " + command }
 
 // ServiceStatus is used by doctor.
 func ServiceStatus() (installed, running, automatic bool, account string) {

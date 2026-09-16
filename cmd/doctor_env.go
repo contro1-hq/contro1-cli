@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerpaths"
@@ -114,8 +115,16 @@ func (e *systemDoctorEnv) EndpointPrincipals(endpoint string) ([]string, error) 
 	return out, nil
 }
 
-func (e *systemDoctorEnv) ExpectedPrincipal(_, subject string) (string, error) {
-	return e.adapter.AllowedPrincipal(subject)
+func (e *systemDoctorEnv) ExpectedPrincipals(_, subject string) ([]string, error) {
+	principal, err := e.adapter.AllowedPrincipal(subject)
+	if err != nil {
+		return nil, err
+	}
+	out := []string{principal}
+	if gid := localipc.PrimaryGroupOf(principal); gid > 0 {
+		out = append(out, "gid:"+strconv.Itoa(gid))
+	}
+	return out, nil
 }
 
 func (e *systemDoctorEnv) RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (string, *runtimeproto.Remediation, error) {

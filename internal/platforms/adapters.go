@@ -75,9 +75,16 @@ func parseAgentList(out []byte) []Subject {
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"agents"`
+			Data []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"data"`
 		}
 		if json.Unmarshal(out, &wrapped) != nil {
 			return nil
+		}
+		if len(wrapped.Agents) == 0 {
+			wrapped.Agents = wrapped.Data
 		}
 		for _, a := range wrapped.Agents {
 			list = append(list, struct {
@@ -152,17 +159,26 @@ func (n *nanoClaw) Discover(ctx context.Context) (Instance, []Subject, error) {
 		Folder string `json:"folder"`
 	}
 	if err := json.Unmarshal(out, &groups); err != nil {
+		// ncl --json answers {ok, data: [...]}; older builds used {groups: [...]}.
 		var wrapped struct {
 			Groups []struct {
 				ID     string `json:"id"`
 				Name   string `json:"name"`
 				Folder string `json:"folder"`
 			} `json:"groups"`
+			Data []struct {
+				ID     string `json:"id"`
+				Name   string `json:"name"`
+				Folder string `json:"folder"`
+			} `json:"data"`
 		}
 		if err := json.Unmarshal(out, &wrapped); err != nil {
 			return inst, nil, fmt.Errorf("unexpected output from %s groups list", n.bin())
 		}
 		groups = wrapped.Groups
+		if len(groups) == 0 {
+			groups = wrapped.Data
+		}
 	}
 	var subjects []Subject
 	for _, g := range groups {

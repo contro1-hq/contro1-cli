@@ -25,7 +25,7 @@ func TestPlans(t *testing.T) {
 
 	linux := Plan("linux", opts)
 	unit := linux.Files[0].Content
-	for _, want := range []string{"User=contro1-broker", "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=", "RuntimeDirectoryMode=0711", "UMask=0077", "ExecStart=/usr/local/lib/contro1/contro1 broker serve --api-url https://api.contro1.com"} {
+	for _, want := range []string{"User=contro1-broker", "NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "CapabilityBoundingSet=CAP_CHOWN", "AmbientCapabilities=CAP_CHOWN", "RuntimeDirectoryMode=0711", "UMask=0077", "ExecStart=/usr/local/lib/contro1/contro1 broker serve --api-url https://api.contro1.com"} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("systemd unit is missing %q:\n%s", want, unit)
 		}

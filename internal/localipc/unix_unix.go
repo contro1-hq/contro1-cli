@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,6 +23,41 @@ import (
 // CurrentIdentity is the identity of this process.
 func CurrentIdentity() (Identity, error) {
 	return Identity{PID: os.Getpid(), User: "uid:" + strconv.Itoa(os.Getuid()), Groups: []string{"gid:" + strconv.Itoa(os.Getgid())}}, nil
+}
+
+// InvokingIdentity is the person who ran the command. Under sudo that is the
+// user sudo was called by, not root: an agent platform runs as that person, so
+// recording uid:0 as the only identity allowed to reach its endpoint would lock
+// the platform out.
+func InvokingIdentity() (Identity, error) {
+	if os.Geteuid() == 0 {
+		uid, gid := os.Getenv("SUDO_UID"), os.Getenv("SUDO_GID")
+		if _, err := strconv.Atoi(uid); err == nil && uid != "0" {
+			id := Identity{PID: os.Getpid(), User: "uid:" + uid}
+			if _, err := strconv.Atoi(gid); err == nil {
+				id.Groups = []string{"gid:" + gid}
+			}
+			return id, nil
+		}
+	}
+	return CurrentIdentity()
+}
+
+// PrimaryGroupOf returns the primary group of a "uid:N" principal, or -1.
+func PrimaryGroupOf(principal string) int {
+	uid, ok := strings.CutPrefix(principal, "uid:")
+	if !ok {
+		return -1
+	}
+	u, err := user.LookupId(uid)
+	if err != nil {
+		return -1
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return -1
+	}
+	return gid
 }
 
 type unixListener struct {

@@ -6,9 +6,11 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -96,22 +98,22 @@ func loopbackFlow(pr *config.Profile, challenge, state, deviceName, accessProfil
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if e := q.Get("error"); e != "" {
-			writeClosePage(w, "Authorization denied. You can close this window.")
+			writeResultPage(w, pr.WebURL, resultPage{Title: "Sign-in was not completed", Body: "The request was declined, so the contro1 CLI on this computer is not signed in. Return to your terminal and run contro1 auth login again when you are ready."})
 			resultCh <- result{err: fmt.Errorf("authorization denied")}
 			return
 		}
 		if q.Get("state") != state {
-			writeClosePage(w, "State mismatch. You can close this window.")
+			writeResultPage(w, pr.WebURL, resultPage{Title: "Sign-in was not completed", Body: "This sign-in link did not match the request your terminal started, so nothing was signed in. Run contro1 auth login again from your terminal."})
 			resultCh <- result{err: fmt.Errorf("state mismatch (possible CSRF)")}
 			return
 		}
 		code := q.Get("code")
 		if code == "" {
-			writeClosePage(w, "Missing code. You can close this window.")
+			writeResultPage(w, pr.WebURL, resultPage{Title: "Sign-in was not completed", Body: "Contro1 did not return a sign-in code. Run contro1 auth login again from your terminal."})
 			resultCh <- result{err: fmt.Errorf("no authorization code returned")}
 			return
 		}
-		writeClosePage(w, "You're signed in to the contro1 CLI. You can close this window.")
+		writeResultPage(w, pr.WebURL, resultPage{OK: true, Title: "You're signed in", Body: "The contro1 CLI on this computer is signed in to your Contro1 organization. Return to your terminal to continue, or open your dashboard."})
 		resultCh <- result{code: code}
 	})
 
@@ -225,10 +227,58 @@ func exchange(pr *config.Profile, code, verifier, deviceName, cliVersion string)
 	}, nil
 }
 
-func writeClosePage(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html")
-	fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>contro1 CLI</title></head>
-<body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f7f7f8">
-<div style="text-align:center"><div style="font-size:40px">&#9989;</div><p style="color:#111">%s</p></div>
-</body></html>`, msg)
+type resultPage struct {
+	OK        bool
+	Title     string
+	Body      string
+	Dashboard string
+	Logo      template.HTML
+}
+
+//go:embed contro1-logo.svg
+var contro1Logo string
+
+// The page a browser lands on after contro1 auth login. It is the first thing a
+// person sees of Contro1 from the CLI, so it looks like Contro1: the logo, the
+// brand colors, a plain sentence about what happened, and a way to the dashboard.
+var resultPageTemplate = template.Must(template.New("result").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}} | Contro1</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f6f6f7;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;color:#374151}
+  .wrap{width:100%;max-width:440px;text-align:center}
+  .logo svg{width:148px;height:auto;display:block;margin:0 auto 28px}
+  .card{background:#fff;border-radius:16px;padding:40px 36px 32px;box-shadow:0 1px 2px rgba(12,0,74,.06),0 12px 32px rgba(12,0,74,.08)}
+  .badge{width:56px;height:56px;border-radius:50%;margin:0 auto 20px;display:flex;align-items:center;justify-content:center}
+  .ok{background:rgba(96,70,215,.1);color:#6046d7}
+  .err{background:#fef2f2;color:#b91c1c}
+  h1{margin:0 0 10px;font-size:22px;line-height:30px;font-weight:700;letter-spacing:-.01em;color:#0c004a}
+  p{margin:0;font-size:15px;line-height:24px}
+  .btn{display:inline-block;margin-top:28px;padding:12px 28px;border-radius:999px;background:#0c004a;color:#fff;
+    font-size:15px;font-weight:600;text-decoration:none}
+  .btn:hover{background:#6046d7}
+  .foot{margin-top:18px;font-size:13px;color:#9ca3af}
+</style></head>
+<body><div class="wrap">
+  <div class="logo">{{.Logo}}</div>
+  <div class="card">
+    {{if .OK}}<div class="badge ok"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+    {{else}}<div class="badge err"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 8v5M12 16.5v.01"/></svg></div>{{end}}
+    <h1>{{.Title}}</h1>
+    <p>{{.Body}}</p>
+    {{if .Dashboard}}<a class="btn" href="{{.Dashboard}}">Go to dashboard</a>{{end}}
+  </div>
+  <p class="foot">You can close this tab.</p>
+</div></body></html>`))
+
+func writeResultPage(w http.ResponseWriter, webURL string, page resultPage) {
+	page.Logo = template.HTML(contro1Logo)
+	if u, err := url.Parse(strings.TrimRight(webURL, "/")); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" {
+		page.Dashboard = u.String() + "/centcom"
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = resultPageTemplate.Execute(w, page)
 }

@@ -206,7 +206,17 @@ func (b *Broker) startData(en brokerstore.Enrollment) error {
 		}
 		sddl = localipc.DataSDDL(en.AllowedPrincipals[0], b.cfg.ServicePrincipal)
 	}
-	l, err := localipc.Listen(localipc.ListenSpec{Endpoint: ep, AllowedPrincipals: principals, SDDL: sddl})
+	socketGroup := 0
+	if runtime.GOOS != "windows" && len(en.AllowedPrincipals) == 1 {
+		// Without this the socket belongs to the service's own group and the
+		// platform user gets EACCES. The group only opens the door: every
+		// accept still checks the caller's uid from the kernel against
+		// AllowedPrincipals, so another member of the group is refused.
+		if gid := localipc.PrimaryGroupOf(en.AllowedPrincipals[0]); gid > 0 {
+			socketGroup = gid
+		}
+	}
+	l, err := localipc.Listen(localipc.ListenSpec{Endpoint: ep, AllowedPrincipals: principals, SDDL: sddl, SocketGroup: socketGroup})
 	if err != nil {
 		return err
 	}

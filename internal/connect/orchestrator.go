@@ -104,6 +104,8 @@ type Broker interface {
 	Register(ctx context.Context, apiURL string, req broker.ControlConnectionsRequest) ([]broker.ControlItemResult, error)
 	PublicStatus() (*brokerstore.PublicStatus, error)
 	MappingPath(platform string) string
+	// SetPrincipals changes who may reach existing endpoints (--repair --principal).
+	SetPrincipals(ctx context.Context, apiURL string, updates []broker.ControlPrincipalUpdate) error
 }
 
 type Verifier interface {
@@ -113,6 +115,9 @@ type Verifier interface {
 
 type Prompter interface {
 	Interactive() bool
+	// Terminal reports a person at a terminal, whatever the output format.
+	// Role changes need one; JSON output alone does not rule a person out.
+	Terminal() bool
 	Confirm(title string, lines []string) bool
 	Progress(line string)
 }
@@ -153,11 +158,13 @@ type Options struct {
 	ConfirmRoles bool
 	Development  bool
 	Repair       bool
-	HostLabel    string
-	HostOS       string
-	HostArch     string
-	WaitTimeout  time.Duration
-	PollEvery    time.Duration
+	// Principal is an explicit --principal; with Repair it moves existing endpoints.
+	Principal   string
+	HostLabel   string
+	HostOS      string
+	HostArch    string
+	WaitTimeout time.Duration
+	PollEvery   time.Duration
 }
 
 type Orchestrator struct {
@@ -426,6 +433,28 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		case <-time.After(opts.PollEvery):
 		}
 	}
+	if opts.Repair && opts.Principal != "" {
+		// An explicit --principal on a repair is the one way to move existing
+		// endpoints to another account without reconnecting.
+		var updates []broker.ControlPrincipalUpdate
+		for _, e := range mapping.Entries {
+			updates = append(updates, broker.ControlPrincipalUpdate{Platform: p, PlatformSubject: e.PlatformSubject, AllowedPrincipals: []string{opts.Principal}})
+		}
+		if len(updates) > 0 {
+			o.Prompt.Progress("Changing who can reach these agents' endpoints...")
+			if err := o.Broker.SetPrincipals(ctx, opts.APIURL, updates); err != nil {
+				if errors.Is(err, installer.ErrElevationDeclined) || errors.Is(err, installer.ErrNeedsElevation) {
+					ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Changing who can reach the agents needs administrator approval on this computer.")
+					ns.WaitingFor = &runtimeproto.WaitingFor{Kind: "local_administrator"}
+					ns.NextCommand = installer.SudoHint(o.cmd(opts, "--repair"))
+					return ns
+				}
+				ns := step(p, runtimeproto.StateError, "Could not change who can reach the agents: "+err.Error())
+				ns.NextCommand = "contro1 doctor " + p
+				return ns
+			}
+		}
+	}
 	if !st.Configured || opts.Repair {
 		if err := o.Adapter.ApplyConfig(ctx, mappingPath, mapping, &st.Journal); err != nil {
 			ns := step(p, runtimeproto.StateError, "Could not configure "+p+": "+err.Error())
@@ -446,9 +475,13 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			}
 			lines = append(lines, line+" -> "+r.After)
 		}
-		confirmed := o.Prompt.Interactive() && (opts.ConfirmRoles || o.Prompt.Confirm("Change who can resolve approvals in these groups?", lines))
+		confirmed := o.Prompt.Terminal() && (opts.ConfirmRoles || (o.Prompt.Interactive() && o.Prompt.Confirm("Change who can resolve approvals in these groups?", lines)))
 		if !confirmed {
-			ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Changing NanoClaw approval roles needs a person at this terminal. --yes does not cover it.")
+			msg := "Changing NanoClaw approval roles needs a person at this terminal. --yes does not cover it."
+			if !o.Prompt.Terminal() {
+				msg = "Changing who approves in NanoClaw needs a person. Run the next command yourself in a terminal, not through an agent; --yes does not cover it."
+			}
+			ns := step(p, runtimeproto.StateNeedsLocalConfirmation, msg)
 			ns.WaitingFor = &runtimeproto.WaitingFor{Kind: "local_administrator"}
 			ns.NextCommand = o.cmd(opts, "--resume "+st.BatchID+" --confirm-roles")
 			ns.Checks = previewChecks(lines)

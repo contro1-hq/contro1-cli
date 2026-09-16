@@ -82,6 +82,9 @@ func (f *fakeBroker) Register(_ context.Context, _ string, req broker.ControlCon
 }
 func (f *fakeBroker) PublicStatus() (*brokerstore.PublicStatus, error) { return nil, errors.New("n/a") }
 func (f *fakeBroker) MappingPath(p string) string                      { return filepath.Join(f.dir, p+".json") }
+func (f *fakeBroker) SetPrincipals(context.Context, string, []broker.ControlPrincipalUpdate) error {
+	return nil
+}
 
 type fakeVerifier struct{ fail map[string]bool }
 
@@ -100,6 +103,7 @@ type fakePrompt struct {
 }
 
 func (f *fakePrompt) Interactive() bool { return f.interactive }
+func (f *fakePrompt) Terminal() bool    { return f.interactive }
 func (f *fakePrompt) Confirm(title string, _ []string) bool {
 	f.asked = append(f.asked, title)
 	return f.answer

@@ -24,6 +24,16 @@ type ControlConnectionsRequest struct {
 	ConnectionTicket string            `json:"connection_ticket"`
 	HostFacts        map[string]string `json:"host_facts,omitempty"`
 	Items            []ControlItem     `json:"items"`
+	// PrincipalUpdates, when set, is the whole request: change who may reach
+	// existing endpoints. No ticket, no new connection.
+	PrincipalUpdates []ControlPrincipalUpdate `json:"principal_updates,omitempty"`
+}
+
+// ControlPrincipalUpdate replaces the identities allowed on one agent's endpoint.
+type ControlPrincipalUpdate struct {
+	Platform          string   `json:"platform"`
+	PlatformSubject   string   `json:"platform_subject"`
+	AllowedPrincipals []string `json:"allowed_principals"`
 }
 
 type ControlItem struct {
@@ -83,6 +93,7 @@ func (b *Broker) controlHandler() http.Handler {
 	mux.HandleFunc("POST /control/v1/enrollments/{local_id}/revoke", b.handleRevoke)
 	mux.HandleFunc("POST /control/v1/enrollments/{local_id}/rotate-key", b.handleRotateKey)
 	mux.HandleFunc("POST /control/v1/mappings", b.handleMappings)
+	mux.HandleFunc("POST /control/v1/principals", b.handlePrincipals)
 	mux.HandleFunc("POST /control/v1/shutdown", b.handleShutdown)
 	return http.MaxBytesHandler(mux, 256<<10)
 }
@@ -306,6 +317,65 @@ func (b *Broker) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = b.cfg.Keys.Delete(oldRef)
 	writeJSON(w, 200, map[string]any{"local_id": localID, "key_thumbprint": newJKT})
+}
+
+// handlePrincipals changes who may reach existing endpoints and restarts them.
+// Control is administrators only, so this is an administrator decision; it is
+// how a connection made from the wrong account is repaired without reconnecting.
+func (b *Broker) handlePrincipals(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Updates []ControlPrincipalUpdate `json:"updates"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil || len(body.Updates) == 0 {
+		writeJSON(w, 400, map[string]any{"error": "invalid_request"})
+		return
+	}
+	for _, u := range body.Updates {
+		if !validPlatformName(u.Platform) || u.PlatformSubject == "" || len(u.AllowedPrincipals) != 1 || u.AllowedPrincipals[0] == "" {
+			writeJSON(w, 400, map[string]any{"error": "each update needs platform, platform_subject and exactly one allowed principal"})
+			return
+		}
+	}
+	var changed []string
+	_, err := b.store.UpdateState(func(st *brokerstore.State) error {
+		for _, u := range body.Updates {
+			for i := range st.Enrollments {
+				en := &st.Enrollments[i]
+				if en.Platform != u.Platform || en.PlatformSubject != u.PlatformSubject {
+					continue
+				}
+				if en.State != "active" && en.State != "pending" {
+					continue
+				}
+				en.AllowedPrincipals = append([]string(nil), u.AllowedPrincipals...)
+				changed = append(changed, en.LocalID)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": "state_update_failed"})
+		return
+	}
+	var failures []string
+	for _, localID := range changed {
+		en, err := b.enrollment(localID)
+		if err != nil {
+			continue
+		}
+		b.stopData(localID)
+		if en.State == "active" {
+			if err := b.startData(*en); err != nil {
+				failures = append(failures, localID+": "+err.Error())
+			}
+		}
+	}
+	b.writeStatus()
+	if len(failures) > 0 {
+		writeJSON(w, 500, map[string]any{"updated": len(changed), "error": strings.Join(failures, "; ")})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"updated": len(changed)})
 }
 
 func (b *Broker) handleMappings(w http.ResponseWriter, r *http.Request) {

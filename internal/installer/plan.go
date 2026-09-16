@@ -166,8 +166,10 @@ func planLinux(opts Options) InstallPlan {
 		"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 		"RestrictNamespaces=yes",
 		"RestrictSUIDSGID=yes",
-		"CapabilityBoundingSet=",
-		"AmbientCapabilities=",
+		// CAP_CHOWN only: a platform user's endpoint socket must belong to
+		// that user's group. Everything else stays dropped.
+		"CapabilityBoundingSet=CAP_CHOWN",
+		"AmbientCapabilities=CAP_CHOWN",
 		"LockPersonality=yes",
 		"MemoryDenyWriteExecute=yes",
 		"SystemCallArchitectures=native",

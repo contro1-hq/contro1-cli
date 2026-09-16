@@ -19,6 +19,7 @@ type fakeEnv struct {
 	discovered                    []string
 	principals                    map[string][]string
 	expected                      map[string]string
+	expectedGroup                 map[string]string
 	agentFor                      map[string]string
 	remediation                   *runtimeproto.Remediation
 	development                   bool
@@ -45,8 +46,12 @@ func (f *fakeEnv) EndpointPrincipals(ep string) ([]string, error) {
 	}
 	return p, nil
 }
-func (f *fakeEnv) ExpectedPrincipal(_, subject string) (string, error) {
-	return f.expected[subject], nil
+func (f *fakeEnv) ExpectedPrincipals(_, subject string) ([]string, error) {
+	out := []string{f.expected[subject]}
+	if g := f.expectedGroup[subject]; g != "" {
+		out = append(out, g)
+	}
+	return out, nil
 }
 func (f *fakeEnv) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, *runtimeproto.Remediation, error) {
 	if f.remediation != nil {
@@ -165,5 +170,25 @@ func TestServerRefusalCarriesRemediation(t *testing.T) {
 	c := find(Run(context.Background(), env, "nanoclaw"), "runtime_status:group-a")
 	if c.Status != runtimeproto.CheckBlocked || c.Actor != "accountable_owner" || c.NextCommand != "Ask Dana to renew." {
 		t.Fatalf("server refusal: %+v", c)
+	}
+}
+
+// On Linux a socket opens to one user through that user's primary group, and
+// the kernel-attested peer uid on every accept narrows it to the user. Doctor
+// reported that correct setup as blocked, so a working connection looked broken.
+func TestUserPrimaryGroupIsNotExposure(t *testing.T) {
+	env := healthy()
+	env.expectedGroup = map[string]string{"group-b": "gid-b"}
+	env.principals["ep-b"] = []string{"gid-b"}
+	if c := find(Run(context.Background(), env, "nanoclaw"), "endpoint_isolation:group-b"); c.Status != runtimeproto.CheckOK {
+		t.Fatalf("the user's own group is the expected access: %+v", c)
+	}
+	env.principals["ep-b"] = []string{"gid-b", "everyone"}
+	if c := find(Run(context.Background(), env, "nanoclaw"), "endpoint_isolation:group-b"); c.Status != runtimeproto.CheckBlocked {
+		t.Fatalf("world access next to the group is still exposure: %+v", c)
+	}
+	env.principals["ep-b"] = []string{"gid-a"}
+	if c := find(Run(context.Background(), env, "nanoclaw"), "endpoint_isolation:group-b"); c.Status != runtimeproto.CheckBlocked {
+		t.Fatalf("another user's group is exposure: %+v", c)
 	}
 }

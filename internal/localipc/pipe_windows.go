@@ -75,6 +75,13 @@ func CurrentIdentity() (Identity, error) {
 	return identityOfToken(windows.GetCurrentProcessToken(), os.Getpid())
 }
 
+// InvokingIdentity is the person who ran the command. Elevation on Windows
+// happens in a separate process, so this is the current identity.
+func InvokingIdentity() (Identity, error) { return CurrentIdentity() }
+
+// PrimaryGroupOf has no meaning for pipes, whose access is a per-SID DACL.
+func PrimaryGroupOf(string) int { return -1 }
+
 type pipeListener struct {
 	ep       Endpoint
 	spec     ListenSpec

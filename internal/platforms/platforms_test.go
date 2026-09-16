@@ -114,3 +114,26 @@ func TestReadMappingValidates(t *testing.T) {
 }
 
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
+
+// Real ncl --json answers {ok, data: [...]}. Reading only a bare array made
+// doctor report "no NanoClaw groups found" on a working install, and the owner
+// saw group ids instead of names on the approval screen.
+func TestNanoClawDiscoveryReadsNclEnvelope(t *testing.T) {
+	for name, out := range map[string]string{
+		"envelope": `{"ok":true,"data":[{"id":"ag-1","name":"Nano"},{"id":"ag-2","folder":"memos"}]}`,
+		"groups":   `{"groups":[{"id":"ag-1","name":"Nano"},{"id":"ag-2","folder":"memos"}]}`,
+		"bare":     `[{"id":"ag-1","name":"Nano"},{"id":"ag-2","folder":"memos"}]`,
+	} {
+		a, _ := New("nanoclaw", Options{Home: t.TempDir(), Bin: "ncl", Runner: fakeRunner(map[string]string{"ncl groups list --json": out})})
+		_, subjects, err := a.Discover(context.Background())
+		if err != nil || len(subjects) != 2 || subjects[0].Display != "Nano" || subjects[1].ID != "ag-2" {
+			t.Fatalf("%s: %+v %v", name, subjects, err)
+		}
+	}
+	a, _ := New("openclaw", Options{Home: t.TempDir(), Runner: fakeRunner(map[string]string{
+		"openclaw agents list --json": `{"ok":true,"data":[{"id":"main","name":"Main"}]}`,
+	})})
+	if _, subjects, err := a.Discover(context.Background()); err != nil || len(subjects) != 1 || subjects[0].Display != "Main" {
+		t.Fatalf("openclaw envelope: %+v %v", subjects, err)
+	}
+}

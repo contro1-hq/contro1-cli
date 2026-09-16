@@ -6,6 +6,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -28,8 +29,10 @@ type Env interface {
 	Discover(ctx context.Context, platform string) ([]string, error)
 	// EndpointPrincipals returns the identities allowed on an endpoint.
 	EndpointPrincipals(endpoint string) ([]string, error)
-	// ExpectedPrincipal is the one identity that should reach a subject's endpoint.
-	ExpectedPrincipal(platform, subject string) (string, error)
+	// ExpectedPrincipals are the identities that may appear on a subject's
+	// endpoint: the caller, and on unix also the caller's primary group, which
+	// is how a socket opens to one user before the peer-uid check narrows it.
+	ExpectedPrincipals(platform, subject string) ([]string, error)
 	// RuntimeStatus calls runtime status through the endpoint (no side effect).
 	RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (agentID string, remediation *runtimeproto.Remediation, err error)
 	// ControlMapPreview runs the no-side-effect round trip.
@@ -128,7 +131,7 @@ func Run(ctx context.Context, env Env, platform string) Report {
 				add(&r, runtimeproto.Check{ID: id, Label: "Private endpoint for " + e.PlatformSubject, Status: runtimeproto.CheckBlocked, Actor: "administrator", Message: "Several agents share one endpoint: " + strings.Join(endpointOwners[e.Endpoint], ", ") + ".", NextCommand: repair})
 				continue
 			}
-			expected, err1 := env.ExpectedPrincipal(platform, e.PlatformSubject)
+			expected, err1 := env.ExpectedPrincipals(platform, e.PlatformSubject)
 			actual, err2 := env.EndpointPrincipals(e.Endpoint)
 			switch {
 			case err2 != nil:
@@ -136,7 +139,7 @@ func Run(ctx context.Context, env Env, platform string) Report {
 			case err1 == nil && !onlyPrincipal(actual, expected):
 				// Exposure is never "repaired" by widening access: the fix
 				// is to narrow it or reconnect, and until then it is blocked.
-				add(&r, runtimeproto.Check{ID: id, Label: "Private endpoint for " + e.PlatformSubject, Status: runtimeproto.CheckBlocked, Actor: "administrator", Message: fmt.Sprintf("The endpoint for %s allows %s; only %s should reach it.", e.PlatformSubject, strings.Join(actual, ", "), expected), NextCommand: repair})
+				add(&r, runtimeproto.Check{ID: id, Label: "Private endpoint for " + e.PlatformSubject, Status: runtimeproto.CheckBlocked, Actor: "administrator", Message: fmt.Sprintf("The endpoint for %s allows %s; only %s should reach it.", e.PlatformSubject, strings.Join(actual, ", "), strings.Join(expected, " or ")), NextCommand: repair})
 			default:
 				add(&r, runtimeproto.Check{ID: id, Label: "Private endpoint for " + e.PlatformSubject, Status: runtimeproto.CheckOK, Message: "Only " + e.PlatformSubject + " can use it."})
 			}
@@ -198,11 +201,16 @@ func diff(discovered []string, m *runtimeproto.MappingFile) (missing, extra []st
 
 // onlyPrincipal: the endpoint admits the expected caller and nothing else
 // except the service and SYSTEM/root, which the environment filters out.
-func onlyPrincipal(actual []string, expected string) bool {
-	if len(actual) != 1 {
+func onlyPrincipal(actual []string, expected []string) bool {
+	if len(actual) == 0 {
 		return false
 	}
-	return actual[0] == expected
+	for _, a := range actual {
+		if !slices.Contains(expected, a) {
+			return false
+		}
+	}
+	return true
 }
 
 func actorFor(r *runtimeproto.Remediation) string {
