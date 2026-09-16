@@ -112,13 +112,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Canonical protocol request: machine-observed facts and agent-reported text
 	// stay separate so routing never depends on the model's own justification.
 	machineObserved := map[string]any{
-		"command": safeCmdStr, "command_sha256": commandHash, "cwd": cwd,
-		"git_branch": gitBranch, "git_commit": gitCommit,
-		"workspace_state_hash": workspaceStateHash, "environment": runEnvironment,
-		"target": runTarget, "enforcement_setup": runSetup,
+		"command":              safeCmdStr,
+		"command_sha256":       commandHash,
+		"cwd":                  cwd,
+		"git_branch":           gitBranch,
+		"git_commit":           gitCommit,
+		"workspace_state_hash": workspaceStateHash,
+		"environment":          runEnvironment,
+		"target":               runTarget,
+		"enforcement_setup":    runSetup,
 	}
 	context := map[string]any{
-		"action":           map[string]any{"tool": "shell", "input": map[string]any{"command": safeCmdStr, "argv": safeCommand}},
+		"action": map[string]any{
+			"tool":  "shell",
+			"input": map[string]any{"command": safeCmdStr, "argv": safeCommand},
+		},
 		"summary":          "A local command is blocked until the routed human approval resolves.",
 		"machine_observed": machineObserved,
 	}
@@ -131,17 +139,26 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runReason != "" {
 		context["agent_reported"] = map[string]any{"justification": safeReason}
 	}
-	source := map[string]any{"integration": "contro1-cli", "framework": "command-runner"}
+	source := map[string]any{
+		"integration": "contro1-cli",
+		"framework":   "command-runner",
+	}
 	if runID := firstString(runExternalRequestID, runTraceID); runID != "" {
 		source["run_id"] = runID
 	}
 	payload := map[string]any{
-		"title":       "Approve running: " + truncate(safeCmdStr, 120),
-		"description": strings.Join(contextLines, "\n"), "request_type": runType,
-		"source": source, "context": context,
+		"title":        "Approve running: " + truncate(safeCmdStr, 120),
+		"description":  strings.Join(contextLines, "\n"),
+		"request_type": runType,
+		"source":       source,
+		"context":      context,
 		"continuation": map[string]any{"mode": "decision", "expires_at": time.Now().Add(runTimeout).UTC().Format(time.RFC3339)},
 		"risk_level":   runRisk,
-		"metadata":     map[string]any{"source": "cli", "executor_wait_until": time.Now().Add(runTimeout).UTC().Format(time.RFC3339), "enforcement_setup": runSetup},
+		"metadata": map[string]any{
+			"source":              "cli",
+			"executor_wait_until": time.Now().Add(runTimeout).UTC().Format(time.RFC3339),
+			"enforcement_setup":   runSetup,
+		},
 	}
 	routing := map[string]any{"priority": "urgent"}
 	if runRole != "" {
@@ -166,8 +183,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runReason != "" {
 		payload["policy_trigger"] = safeReason
 		payload["policy_context"] = map[string]any{
-			"source": "contro1-cli", "policy_name": "command-approval",
-			"rule_id": "command.requires-human-authorization", "rule_reason": safeReason,
+			"source":      "contro1-cli",
+			"policy_name": "command-approval",
+			"rule_id":     "command.requires-human-authorization",
+			"rule_reason": safeReason,
 			"enforcement": runSetup,
 		}
 	}
@@ -259,6 +278,8 @@ func redactCommandArgs(command []string) []string {
 func execCommand(command []string, structuredOutput bool) int {
 	c := exec.Command(command[0], command[1:]...)
 	if structuredOutput {
+		// Preserve the CLI's stdout JSON/YAML contract for agents and CI. The
+		// child process remains visible in the job log via stderr.
 		c.Stdout = os.Stderr
 	} else {
 		c.Stdout = os.Stdout
@@ -277,12 +298,21 @@ func execCommand(command []string, structuredOutput bool) int {
 
 func recordRunEvidence(c *client.Client, reqID, command, cwd, branch, commit, commandHash, expectedWorkspaceHash, actualWorkspaceHash, executionStatus string, exitCode *int, started, finished time.Time) string {
 	body := map[string]any{
-		"request_id": reqID, "command": command, "command_sha256": commandHash,
-		"cwd": cwd, "git_branch": branch, "git_commit": commit,
-		"expected_workspace_hash": expectedWorkspaceHash, "actual_workspace_hash": actualWorkspaceHash,
-		"execution_status": executionStatus, "environment": runEnvironment, "target": runTarget,
-		"enforcement_setup": runSetup, "agent_id": runAgent,
-		"started_at": started.UTC().Format(time.RFC3339), "finished_at": finished.UTC().Format(time.RFC3339),
+		"request_id":              reqID,
+		"command":                 command,
+		"command_sha256":          commandHash,
+		"cwd":                     cwd,
+		"git_branch":              branch,
+		"git_commit":              commit,
+		"expected_workspace_hash": expectedWorkspaceHash,
+		"actual_workspace_hash":   actualWorkspaceHash,
+		"execution_status":        executionStatus,
+		"environment":             runEnvironment,
+		"target":                  runTarget,
+		"enforcement_setup":       runSetup,
+		"agent_id":                runAgent,
+		"started_at":              started.UTC().Format(time.RFC3339),
+		"finished_at":             finished.UTC().Format(time.RFC3339),
 	}
 	if exitCode != nil {
 		body["exit_code"] = *exitCode

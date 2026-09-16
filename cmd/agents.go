@@ -20,10 +20,10 @@ func init() {
 	}
 
 	registerCmd := &cobra.Command{
-		Use:   "register",
-		Short: "Register a caller-declared agent (idempotent on name)",
+		Use:     "register",
+		Short:   "Register a caller-declared agent (idempotent on name)",
 		Example: `  contro1 agents register --name "Claude Code - Laptop" --type coding-agent`,
-		RunE: runAgentRegister,
+		RunE:    runAgentRegister,
 	}
 	registerCmd.Flags().StringVar(&agentName, "name", "", "agent name (required)")
 	registerCmd.Flags().StringVar(&agentFramework, "type", "", "framework/type (e.g. coding-agent, langgraph)")

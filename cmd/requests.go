@@ -53,7 +53,28 @@ var (
 
 	waitTimeout  time.Duration
 	waitInterval time.Duration
+
+	reqRuntime bool
 )
+
+// requestClient picks the identity for a requests command. Without --runtime it
+// is the normal CLI identity (CONTRO1_TOKEN or the keychain). With --runtime it is
+// the host bridge's Agent Credential only: never the keychain, never a cco_cli_
+// token, and confirmed agent-bound with the scopes the command needs. The choice
+// is explicit per call, so a bridge cannot drift into a developer's login.
+func requestClient(requiredScopes ...string) (*client.Client, *config.Profile, error) {
+	if !reqRuntime {
+		return newClient()
+	}
+	c, pr, _, err := newRuntimeClient()
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := requireRuntimeStatus(c, requiredScopes...); err != nil {
+		return nil, nil, err
+	}
+	return c, pr, nil
+}
 
 func init() {
 	requestsCmd := &cobra.Command{
@@ -61,6 +82,8 @@ func init() {
 		Short:   "Create and follow approval requests",
 		GroupID: groupAgent,
 	}
+	requestsCmd.PersistentFlags().BoolVar(&reqRuntime, "runtime", false,
+		"use the host bridge Agent Credential (CONTRO1_AGENT_TOKEN_FILE, CONTRO1_AGENT_TOKEN, CONTRO1_TOKEN); never the keychain")
 
 	createCmd := &cobra.Command{
 		Use:   "create",
@@ -225,11 +248,19 @@ func runRequestCreate(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	applyDefaultAgent(payload, pr)
+	// A runtime credential is already bound to its agent, and the server refuses a
+	// different agent_id, so the profile's default agent does not apply.
+	if !reqRuntime {
+		applyDefaultAgent(payload, pr)
+	}
 	if reqDryRun {
 		return output.Render(outFormat(pr), payload, nil)
 	}
-	c, pr, err := newClient()
+	scopes := []string{"requests:create"}
+	if reqWait {
+		scopes = append(scopes, "requests:read")
+	}
+	c, pr, err := requestClient(scopes...)
 	if err != nil {
 		return err
 	}
@@ -262,7 +293,7 @@ func applyDefaultAgent(payload map[string]any, pr *config.Profile) {
 }
 
 func runRequestControlMap(_ *cobra.Command, _ []string) error {
-	c, pr, err := newClient()
+	c, pr, err := requestClient("requests:create")
 	if err != nil {
 		return err
 	}
@@ -285,7 +316,7 @@ func runRequestControlMap(_ *cobra.Command, _ []string) error {
 }
 
 func runRequestList(_ *cobra.Command, _ []string) error {
-	c, pr, err := newClient()
+	c, pr, err := requestClient("requests:read")
 	if err != nil {
 		return err
 	}
@@ -455,7 +486,7 @@ func appendUnique(values []string, value string) []string {
 }
 
 func runRequestGet(_ *cobra.Command, args []string) error {
-	c, pr, err := newClient()
+	c, pr, err := requestClient("requests:read")
 	if err != nil {
 		return err
 	}
@@ -467,7 +498,7 @@ func runRequestGet(_ *cobra.Command, args []string) error {
 }
 
 func runRequestWait(_ *cobra.Command, args []string) error {
-	c, pr, err := newClient()
+	c, pr, err := requestClient("requests:read")
 	if err != nil {
 		return err
 	}
@@ -479,7 +510,7 @@ func runRequestWait(_ *cobra.Command, args []string) error {
 }
 
 func runRequestCancel(_ *cobra.Command, args []string) error {
-	c, pr, err := newClient()
+	c, pr, err := requestClient("requests:cancel_own")
 	if err != nil {
 		return err
 	}

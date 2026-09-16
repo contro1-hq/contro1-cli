@@ -1,3 +1,7 @@
 /contro1
 /contro1.exe
+/contro1-linux-amd64
+/contro1-linux-arm64
+/contro1-darwin-amd64
+/contro1-darwin-arm64
 /dist/

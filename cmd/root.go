@@ -47,6 +47,9 @@ audit-ready evidence - all with a scoped, browser-issued token.
 For coding agents and developer workflows, contro1 can also gate a local command
 before it runs.
 
+Host-side runtime bridges (OpenClaw, NanoClaw) use the same binary with an Agent
+Credential from the environment. Action execution refuses browser-issued tokens.
+
 Get started:
   contro1 auth login
   contro1 init --name "Claude Code - Laptop"
@@ -63,7 +66,7 @@ func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
 		var ee *output.ExitError
 		if asExit(err, &ee) {
-			fmt.Fprintln(os.Stderr, "error: "+ee.Msg)
+			output.RenderError(flagFormat, ee)
 			return ee.Code
 		}
 		fmt.Fprintln(os.Stderr, "error: "+err.Error())
@@ -103,6 +106,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&flagProfile, "profile", "", "configuration profile to use")
 	rootCmd.PersistentFlags().StringVar(&flagAPIURL, "api-url", "", "override the API base URL")
 	rootCmd.PersistentFlags().BoolVar(&flagQuiet, "quiet", false, "suppress status messages")
+	rootCmd.PersistentFlags().StringVar(&flagBrokerEndpoint, "broker-endpoint", "", "runtime commands: this agent's Contro1 service endpoint (exclusive with token variables)")
 
 	rootCmd.AddGroup(
 		&cobra.Group{ID: groupCore, Title: "Core:"},
@@ -143,9 +147,13 @@ func loadCtx() (*config.Config, *config.Profile, string, error) {
 	return cfg, pr, name, nil
 }
 
-// resolveToken returns the bearer token: CONTRO1_TOKEN env wins, else the keychain.
+// resolveToken returns the bearer token for the normal interactive/CI CLI
+// surface: CONTRO1_TOKEN wins, else the keychain. Runtime bridge credentials are
+// intentionally not read here; CONTRO1_AGENT_TOKEN_FILE and CONTRO1_AGENT_TOKEN
+// are accepted only by runtime-only commands so they cannot quietly change the
+// identity used by ask, queue or other operator/developer commands.
 func resolveToken(profileName string) (string, error) {
-	if tok := os.Getenv("CONTRO1_TOKEN"); tok != "" {
+	if tok := strings.TrimSpace(os.Getenv("CONTRO1_TOKEN")); tok != "" {
 		return tok, nil
 	}
 	tok, err := keychain.Retrieve(profileName)
@@ -161,8 +169,12 @@ func newClient() (*client.Client, *config.Profile, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if pr.AccessProfile == "operator" && os.Getenv("CONTRO1_TOKEN") != "" {
-		return nil, nil, output.Errf(output.CodeAuth, "operator mode requires an interactive browser-issued profile; CONTRO1_TOKEN is only supported for agent/CI use")
+	// Every env token source counts, not just CONTRO1_TOKEN: even though normal
+	// commands do not read CONTRO1_AGENT_TOKEN*, their presence usually means this
+	// shell belongs to a runtime bridge. Refuse operator mode rather than letting
+	// an automation environment masquerade as an interactive operator session.
+	if pr.AccessProfile == "operator" && anyEnvTokenConfigured() {
+		return nil, nil, output.Errf(output.CodeAuth, "operator mode requires an interactive browser-issued profile; CONTRO1_TOKEN, CONTRO1_AGENT_TOKEN and CONTRO1_AGENT_TOKEN_FILE are only supported for agent/CI use")
 	}
 	apiURL := pr.APIURL
 	if flagAPIURL != "" {
@@ -176,22 +188,9 @@ func newClient() (*client.Client, *config.Profile, error) {
 }
 
 func infof(format string, args ...any) {
-	if suppressInfo(flagFormat, flagQuiet, os.Getenv("CI") != "") {
-		return
+	if !flagQuiet {
+		output.Info(format, args...)
 	}
-
-	output.Info(format, args...)
-}
-
-func suppressInfo(format string, quiet bool, ci bool) bool {
-	if quiet || ci {
-		return true
-	}
-	switch strings.ToLower(format) {
-	case "json", "yaml":
-		return true
-	}
-	return false
 }
 
 // asExit is a tiny errors.As wrapper kept local to avoid importing errors widely.

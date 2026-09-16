@@ -12,13 +12,27 @@ import (
 	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/output"
+	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 )
 
 type Client struct {
 	BaseURL   string
 	Token     string
 	UserAgent string
-	http      *http.Client
+	// NetworkRemediation is attached to transport failures (e.g. the local
+	// Contro1 service is not running).
+	NetworkRemediation *runtimeproto.Remediation
+	http               *http.Client
+}
+
+// NewWithHTTPClient uses a caller-supplied transport, e.g. the broker's local
+// endpoint. Token may be empty: the broker adds the credential.
+func NewWithHTTPClient(baseURL, token, userAgent string, hc *http.Client) *Client {
+	c := New(baseURL, token, userAgent)
+	if hc != nil {
+		c.http = hc
+	}
+	return c
 }
 
 func New(baseURL, token, userAgent string) *Client {
@@ -33,6 +47,11 @@ func New(baseURL, token, userAgent string) *Client {
 // Do performs a request and returns the parsed JSON object. Non-2xx responses are
 // returned as *output.ExitError with an appropriate exit code.
 func (c *Client) Do(method, path string, body any) (map[string]any, error) {
+	return c.DoWithHeaders(method, path, body, nil)
+}
+
+// DoWithHeaders is Do with extra request headers, e.g. Idempotency-Key.
+func (c *Client) DoWithHeaders(method, path string, body any, headers map[string]string) (map[string]any, error) {
 	var reader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -54,10 +73,15 @@ func (c *Client) Do(method, path string, body any) (map[string]any, error) {
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	for k, v := range headers {
+		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
+			req.Header.Set(k, v)
+		}
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, output.Errf(output.CodeNetwork, "network error: %v", err)
+		return nil, output.Errf(output.CodeNetwork, "network error: %v", err).WithRemediation(c.NetworkRemediation)
 	}
 	defer resp.Body.Close()
 
@@ -75,7 +99,9 @@ func (c *Client) Do(method, path string, body any) (map[string]any, error) {
 	}
 
 	code, msg := extractError(parsed, raw)
-	return parsed, output.Errf(httpExitCode(resp.StatusCode, code), "%s", msg)
+	exitErr := output.Errf(httpExitCode(resp.StatusCode, code), "%s", msg)
+	exitErr.Remediation = ExtractRemediation(parsed)
+	return parsed, exitErr
 }
 
 // Data unwraps the {ok,data} envelope used by CLI-specific endpoints; for plain
@@ -88,6 +114,31 @@ func Data(resp map[string]any) any {
 		return d
 	}
 	return resp
+}
+
+// ExtractRemediation reads `error.remediation` or a top-level `remediation`.
+func ExtractRemediation(parsed map[string]any) *runtimeproto.Remediation {
+	if parsed == nil {
+		return nil
+	}
+	var raw any
+	if e, ok := parsed["error"].(map[string]any); ok && e["remediation"] != nil {
+		raw = e["remediation"]
+	} else if parsed["remediation"] != nil {
+		raw = parsed["remediation"]
+	}
+	if raw == nil {
+		return nil
+	}
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var r runtimeproto.Remediation
+	if json.Unmarshal(buf, &r) != nil || r.Code == "" {
+		return nil
+	}
+	return &r
 }
 
 func extractError(parsed map[string]any, raw []byte) (string, string) {
@@ -125,6 +176,10 @@ func httpExitCode(status int, errCode string) int {
 		return output.CodeAuth
 	case status == 403 && errCode == "INSUFFICIENT_SCOPE":
 		return output.CodeInsufficient
+	case status == 404:
+		return output.CodeNotFound
+	case status == 409 || status == 412:
+		return output.CodeConflict
 	case status >= 500:
 		return output.CodeGeneral
 	default:

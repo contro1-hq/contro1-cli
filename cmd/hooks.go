@@ -68,7 +68,11 @@ var secretValuePatterns = []struct {
 var secretFieldPattern = regexp.MustCompile(`(?i)^(api[_-]?key|token|secret|password|authorization)$`)
 
 func init() {
-	hooksCmd := &cobra.Command{Use: "hooks", Short: "Adapters for coding-agent lifecycle hooks", GroupID: groupAgent}
+	hooksCmd := &cobra.Command{
+		Use:     "hooks",
+		Short:   "Adapters for coding-agent lifecycle hooks",
+		GroupID: groupAgent,
+	}
 	codexCmd := &cobra.Command{
 		Use:   "codex",
 		Short: "Gate production deploys from Codex hooks",
@@ -93,6 +97,7 @@ normal permission flow.`,
 	codexCmd.Flags().DurationVar(&codexHookTimeout, "timeout", envDuration("CONTRO1_DEPLOY_TIMEOUT", 15*time.Minute), "maximum time Codex remains blocked")
 	codexCmd.Flags().StringArrayVar(&codexHookMatch, "match", nil, "additional deploy command regex; repeat as needed")
 	codexCmd.Flags().BoolVar(&codexHookAllBash, "all-bash", false, "gate every Bash command instead of deploy-like commands")
+
 	hooksCmd.AddCommand(codexCmd)
 	rootCmd.AddCommand(hooksCmd)
 }
@@ -121,11 +126,14 @@ func runCodexHook(_ *cobra.Command, _ []string) error {
 		return renderCodexHookDecision(input, false, "Blocked: invalid deploy policy configuration.")
 	}
 	if !matched {
+		// No output means this adapter declines to decide. Codex continues with its
+		// own normal sandbox and permission policy.
 		return nil
 	}
 	if codexHookSetup != "convenience" && codexHookSetup != "enterprise" {
 		return renderCodexHookDecision(input, false, "Blocked: --setup must be convenience or enterprise.")
 	}
+
 	c, _, err := newClient()
 	if err != nil {
 		return renderCodexHookDecision(input, false, "Blocked: Contro1 authentication is unavailable.")
@@ -140,6 +148,7 @@ func runCodexHook(_ *cobra.Command, _ []string) error {
 		return renderCodexHookDecision(input, false, "Blocked: Contro1 returned no request id.")
 	}
 	infof("Production deploy blocked. Contro1 request: %s", requestID)
+
 	final, decision, waitErr := waitForRequest(c, requestID, codexHookTimeout, 3*time.Second)
 	if waitErr != nil {
 		cancelHookRequest(c, requestID)
@@ -155,6 +164,7 @@ func runCodexHook(_ *cobra.Command, _ []string) error {
 		}
 		return renderCodexHookDecision(input, false, message)
 	}
+
 	infof("Approved by Contro1. Codex may run the exact reviewed command.")
 	return renderCodexHookDecision(input, true, "")
 }
@@ -167,14 +177,22 @@ func buildCodexDeployPayload(input codexHookInput, command string) map[string]an
 	branch := gitOutput("rev-parse", "--abbrev-ref", "HEAD")
 	workspaceState := gitOutput("status", "--porcelain=v1", "--untracked-files=normal")
 	machineObserved := map[string]any{
-		"command": safeCommand, "command_sha256": commandHash,
-		"cwd": firstString(input.CWD, mustGetwd()), "git_branch": branch,
-		"git_commit": commit, "workspace_state_hash": sha256Hex(workspaceState),
-		"environment": codexHookEnvironment, "target": codexHookTarget,
-		"hook_event": input.HookEventName, "permission_mode": input.PermissionMode,
-		"enforcement_setup": codexHookSetup,
+		"command":              safeCommand,
+		"command_sha256":       commandHash,
+		"cwd":                  firstString(input.CWD, mustGetwd()),
+		"git_branch":           branch,
+		"git_commit":           commit,
+		"workspace_state_hash": sha256Hex(workspaceState),
+		"environment":          codexHookEnvironment,
+		"target":               codexHookTarget,
+		"hook_event":           input.HookEventName,
+		"permission_mode":      input.PermissionMode,
+		"enforcement_setup":    codexHookSetup,
 	}
-	source := map[string]any{"integration": "codex", "framework": "codex-cli-hook"}
+	source := map[string]any{
+		"integration": "codex",
+		"framework":   "codex-cli-hook",
+	}
 	if input.SessionID != "" {
 		source["session_id"] = input.SessionID
 	}
@@ -182,11 +200,16 @@ func buildCodexDeployPayload(input codexHookInput, command string) map[string]an
 		source["run_id"] = runID
 	}
 	context := map[string]any{
-		"action":           map[string]any{"tool": "shell", "input": safeToolInput},
+		"action": map[string]any{
+			"tool":  "shell",
+			"input": safeToolInput,
+		},
 		"environment":      codexHookEnvironment,
 		"summary":          "Production deployment command intercepted by a Codex lifecycle hook.",
 		"machine_observed": machineObserved,
-		"agent_reported":   map[string]any{"justification": codexHookReason},
+		"agent_reported": map[string]any{
+			"justification": codexHookReason,
+		},
 	}
 	if codexHookTarget != "" {
 		context["resource"] = codexHookTarget
@@ -194,28 +217,45 @@ func buildCodexDeployPayload(input codexHookInput, command string) map[string]an
 	payload := map[string]any{
 		"title":        "Approve production deploy from Codex?",
 		"description":  "Codex is blocked before executing the reviewed command.",
-		"request_type": "approval", "source": source,
-		"routing":      map[string]any{"required_role": codexHookRole, "priority": "urgent", "sla_minutes": codexHookSLAMinutes},
-		"context":      context,
-		"continuation": map[string]any{"mode": "decision", "expires_at": time.Now().Add(codexHookTimeout).UTC().Format(time.RFC3339)},
-		"risk_level":   codexHookRisk, "policy_trigger": codexHookReason,
+		"request_type": "approval",
+		"source":       source,
+		"routing": map[string]any{
+			"required_role": codexHookRole,
+			"priority":      "urgent",
+			"sla_minutes":   codexHookSLAMinutes,
+		},
+		"context": context,
+		"continuation": map[string]any{
+			"mode":       "decision",
+			"expires_at": time.Now().Add(codexHookTimeout).UTC().Format(time.RFC3339),
+		},
+		"risk_level":     codexHookRisk,
+		"policy_trigger": codexHookReason,
 		"policy_context": map[string]any{
-			"source": "codex-hook", "policy_name": "production-deploy-approval",
-			"rule_id": "deploy.requires-human-authorization", "rule_reason": codexHookReason,
+			"source":      "codex-hook",
+			"policy_name": "production-deploy-approval",
+			"rule_id":     "deploy.requires-human-authorization",
+			"rule_reason": codexHookReason,
 			"enforcement": codexHookSetup,
 		},
 		"external_request_id": codexExternalRequestID(input, commandHash),
 		"correlation_id":      firstString(input.SessionID, "codex-deploy"),
-		"metadata":            map[string]any{"adapter": "contro1-cli", "enforcement_setup": codexHookSetup},
+		"metadata": map[string]any{
+			"adapter":           "contro1-cli",
+			"enforcement_setup": codexHookSetup,
+		},
 	}
 	if codexHookRequiredApprovals > 0 {
 		payload["approval_policy"] = map[string]any{
-			"mode": thresholdMode(codexHookRequiredApprovals), "required_approvals": codexHookRequiredApprovals,
-			"required_roles": []string{codexHookRole}, "separation_of_duties": true,
+			"mode":                   thresholdMode(codexHookRequiredApprovals),
+			"required_approvals":     codexHookRequiredApprovals,
+			"required_roles":         []string{codexHookRole},
+			"separation_of_duties":   true,
 			"fail_closed_on_timeout": true,
 		}
 		payload["approval_requirements"] = map[string]any{
-			"required_approvals": codexHookRequiredApprovals, "required_roles": []string{codexHookRole},
+			"required_approvals": codexHookRequiredApprovals,
+			"required_roles":     []string{codexHookRole},
 		}
 	}
 	return payload
@@ -260,7 +300,11 @@ func renderCodexHookDecision(input codexHookInput, allow bool, message string) e
 		if allow {
 			decision = "allow"
 		}
-		specific := map[string]any{"hookEventName": "PreToolUse", "permissionDecision": decision, "permissionDecisionReason": message}
+		specific := map[string]any{
+			"hookEventName":            "PreToolUse",
+			"permissionDecision":       decision,
+			"permissionDecisionReason": message,
+		}
 		if allow {
 			specific["updatedInput"] = input.ToolInput
 		}
@@ -274,9 +318,15 @@ func renderCodexHookDecision(input codexHookInput, allow bool, message string) e
 		if !allow && message != "" {
 			decision["message"] = message
 		}
-		payload = map[string]any{"hookSpecificOutput": map[string]any{"hookEventName": "PermissionRequest", "decision": decision}}
+		payload = map[string]any{
+			"hookSpecificOutput": map[string]any{
+				"hookEventName": "PermissionRequest",
+				"decision":      decision,
+			},
+		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(payload)
+	enc := json.NewEncoder(os.Stdout)
+	return enc.Encode(payload)
 }
 
 func matchesDeployCommand(command string, extra []string, allBash bool) (bool, error) {
@@ -301,7 +351,8 @@ func matchesDeployCommand(command string, extra []string, allBash bool) (bool, e
 }
 
 func codexExternalRequestID(input codexHookInput, commandHash string) string {
-	return strings.Join([]string{"codex", input.SessionID, firstString(input.ToolUseID, input.TurnID), commandHash[:16]}, ":")
+	parts := []string{"codex", input.SessionID, firstString(input.ToolUseID, input.TurnID), commandHash[:16]}
+	return strings.Join(parts, ":")
 }
 
 func cancelHookRequest(c *client.Client, requestID string) {
@@ -317,13 +368,19 @@ func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
+
 func thresholdMode(required int) string {
 	if required > 1 {
 		return "threshold"
 	}
 	return "single"
 }
-func mustGetwd() string { cwd, _ := os.Getwd(); return cwd }
+
+func mustGetwd() string {
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
 func firstString(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -332,12 +389,14 @@ func firstString(values ...string) string {
 	}
 	return ""
 }
+
 func envOr(name, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 		return value
 	}
 	return fallback
 }
+
 func envInt(name string, fallback int) int {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -349,6 +408,7 @@ func envInt(name string, fallback int) int {
 	}
 	return fallback
 }
+
 func envDuration(name string, fallback time.Duration) time.Duration {
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
 		if parsed, err := time.ParseDuration(value); err == nil {

@@ -11,10 +11,15 @@ func TestMatchesDeployCommand(t *testing.T) {
 		command string
 		want    bool
 	}{
-		{"npm test", false}, {"npm run deploy", true}, {"pnpm deploy:production", true},
-		{"kubectl apply -f k8s/production.yaml", true}, {"helm upgrade billing ./chart", true},
-		{"terraform plan", false}, {"terraform apply plan.tfplan", true},
-		{"rg deploy README.md", false}, {"npm test && git status", false},
+		{"npm test", false},
+		{"npm run deploy", true},
+		{"pnpm deploy:production", true},
+		{"kubectl apply -f k8s/production.yaml", true},
+		{"helm upgrade billing ./chart", true},
+		{"terraform plan", false},
+		{"terraform apply plan.tfplan", true},
+		{"rg deploy README.md", false},
+		{"npm test && git status", false},
 		{"npm test && npm run deploy:prod", true},
 	}
 	for _, test := range tests {
@@ -41,13 +46,26 @@ func TestBuildCodexDeployPayloadSeparatesProvenance(t *testing.T) {
 		codexHookRole, codexHookRisk, codexHookEnvironment, codexHookTarget, codexHookReason, codexHookSetup = oldRole, oldRisk, oldEnvironment, oldTarget, oldReason, oldSetup
 		codexHookSLAMinutes, codexHookRequiredApprovals, codexHookTimeout = oldSLA, oldApprovals, oldTimeout
 	})
-	codexHookRole, codexHookRisk, codexHookEnvironment, codexHookTarget = "cto", "critical", "production", "billing-api"
-	codexHookReason, codexHookSetup, codexHookSLAMinutes, codexHookRequiredApprovals = "Production deploy requires CTO approval", "enterprise", 10, 2
+	codexHookRole = "cto"
+	codexHookRisk = "critical"
+	codexHookEnvironment = "production"
+	codexHookTarget = "billing-api"
+	codexHookReason = "Production deploy requires CTO approval"
+	codexHookSetup = "enterprise"
+	codexHookSLAMinutes = 10
+	codexHookRequiredApprovals = 2
+
 	payload := buildCodexDeployPayload(codexHookInput{
-		SessionID: "session-1", TurnID: "turn-1", ToolUseID: "tool-1", CWD: "C:/repo",
-		HookEventName: "PreToolUse", PermissionMode: "default", ToolName: "Bash",
-		ToolInput: map[string]any{"command": "npm run deploy"},
+		SessionID:      "session-1",
+		TurnID:         "turn-1",
+		ToolUseID:      "tool-1",
+		CWD:            "C:/repo",
+		HookEventName:  "PreToolUse",
+		PermissionMode: "default",
+		ToolName:       "Bash",
+		ToolInput:      map[string]any{"command": "npm run deploy"},
 	}, "npm run deploy")
+
 	if payload["request_type"] != "approval" || payload["risk_level"] != "critical" {
 		t.Fatalf("unexpected canonical request: %#v", payload)
 	}

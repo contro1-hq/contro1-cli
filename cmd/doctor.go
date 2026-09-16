@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -13,12 +12,21 @@ import (
 )
 
 func init() {
-	rootCmd.AddCommand(&cobra.Command{
-		Use:     "doctor",
-		Short:   "Diagnose connectivity, authentication and scopes",
+	doctorRoot := &cobra.Command{
+		Use:     "doctor [openclaw|nanoclaw|claude-code]",
+		Short:   "Diagnose connectivity, authentication and scopes; with a platform, its Contro1 connections",
 		GroupID: groupCore,
-		RunE:    runDoctor,
-	})
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return runDoctorPlatform(cmd, args[0])
+			}
+			return runDoctor(cmd, args)
+		},
+	}
+	doctorRoot.Flags().BoolVar(&flagConnectDevelopment, "development", false, "check the development Contro1 service")
+	doctorRoot.Flags().StringVar(&flagConnectBin, "platform-cli", "", "platform CLI to use for discovery")
+	rootCmd.AddCommand(doctorRoot)
 }
 
 type checkResult struct {
@@ -49,11 +57,15 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 	// auth
 	tok, terr := resolveToken(name)
 	tokenSource := "keychain"
-	if os.Getenv("CONTRO1_TOKEN") != "" {
-		tokenSource = "CONTRO1_TOKEN env"
+	if _, source, _ := envToken(); source != "" {
+		tokenSource = source + " env"
 	}
 	if terr != nil {
-		add("Authenticated", false, "run 'contro1 auth login'")
+		detail := "run 'contro1 auth login'"
+		if anyEnvTokenConfigured() {
+			detail = terr.Error()
+		}
+		add("Authenticated", false, detail)
 		return renderDoctor(pr, checks)
 	}
 	add("Token present", true, tokenSource)
