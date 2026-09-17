@@ -109,8 +109,14 @@ func TestWrongMapping(t *testing.T) {
 	env.discovered = []string{"group-a", "group-b", "group-c"}
 	r := Run(context.Background(), env, "nanoclaw")
 	c := find(r, "mapping_complete")
-	if c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "group-c") || c.Actor != "accountable_owner" {
-		t.Fatalf("new group must need a new approval: %+v", c)
+	// Connecting some agents and not others is a choice: it is reported, with
+	// the command to add one, and does not fail doctor.
+	if c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "group-c") || c.NextCommand != "contro1 connect nanoclaw --agent group-c" || r.State == "repairable" {
+		t.Fatalf("an unconnected group is reported, not a failure: %+v state=%s", c, r.State)
+	}
+	env.mapping.Entries = append(env.mapping.Entries, runtimeproto.MappingEntry{PlatformSubject: "group-gone", AgentID: "agt_gone", Endpoint: "ep-gone", EndpointMode: runtimeproto.ModeApprovalsOnly})
+	if c := find(Run(context.Background(), env, "nanoclaw"), "mapping_complete"); c.Status != runtimeproto.CheckRepairable {
+		t.Fatalf("a connected agent that disappeared is still a problem: %+v", c)
 	}
 }
 

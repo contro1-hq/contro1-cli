@@ -111,10 +111,16 @@ func Run(ctx context.Context, env Env, platform string) Report {
 		add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "Could not list " + platform + " agents: " + discErr.Error(), NextCommand: repair})
 	default:
 		missing, extra := diff(discovered, mapping)
-		if len(missing) > 0 {
-			add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "accountable_owner", Message: "Not connected yet: " + strings.Join(missing, ", ") + ". Adding them needs a new approval.", NextCommand: fmt.Sprintf("contro1 connect %s", platform)})
-		} else if len(extra) > 0 {
+		if len(extra) > 0 {
 			add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "Mapped but no longer present: " + strings.Join(extra, ", ") + ".", NextCommand: fmt.Sprintf("contro1 disconnect %s --dry-run", platform)})
+		} else if len(missing) > 0 {
+			// Connecting only some agents is a choice, not a fault. An agent that
+			// is not connected keeps its platform's own approvers and has no
+			// Contro1 identity, so nothing here is broken; it is reported so a
+			// newly added agent does not go unnoticed, with the command to add it.
+			add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Connected agents mapped", Status: runtimeproto.CheckOK,
+				Message:     fmt.Sprintf("%d connected. Not connected: %s. They are not governed by Contro1 until you connect them.", len(mapping.Entries), strings.Join(missing, ", ")),
+				NextCommand: fmt.Sprintf("contro1 connect %s --agent %s", platform, missing[0])})
 		} else {
 			add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckOK, Message: fmt.Sprintf("%d agent(s) mapped exactly.", len(discovered))})
 		}
