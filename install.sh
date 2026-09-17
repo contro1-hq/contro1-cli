@@ -44,21 +44,51 @@ echo "Downloading $url"
 curl -fsSL "$url" -o "$tmp/$asset"
 tar -xzf "$tmp/$asset" -C "$tmp"
 
-dir="${CONTRO1_INSTALL_DIR:-/usr/local/bin}"
-if [ ! -w "$dir" ] 2>/dev/null && [ -z "${CONTRO1_INSTALL_DIR:-}" ]; then
-  if [ "$(id -u)" -ne 0 ]; then
+# Where to install:
+#   1. CONTRO1_INSTALL_DIR when set.
+#   2. Where contro1 already is, when that place is writable: updating in place
+#      means an old copy can never sit earlier on PATH and shadow the new one.
+#   3. /usr/local/bin, through sudo only when sudo can actually ask someone (a
+#      terminal) or needs no password. Piped from an agent with no terminal, a
+#      sudo prompt would wait forever for a password nobody can type.
+#   4. Otherwise ~/.local/bin, no privileges needed.
+dir="${CONTRO1_INSTALL_DIR:-}"
+if [ -z "$dir" ]; then
+  existing=$(command -v "$BIN" 2>/dev/null || true)
+  if [ -n "$existing" ] && [ -w "$(dirname "$existing")" ]; then
+    dir=$(dirname "$existing")
+  fi
+fi
+if [ -z "$dir" ]; then
+  dir=/usr/local/bin
+  if [ ! -w "$dir" ] && [ "$(id -u)" -ne 0 ]; then
+    can_sudo=""
     if command -v sudo >/dev/null 2>&1; then
+      if sudo -n true 2>/dev/null; then
+        can_sudo=yes
+      elif (: </dev/tty) 2>/dev/null; then
+        can_sudo=tty
+      fi
+    fi
+    if [ -n "$can_sudo" ]; then
       echo "Installing to $dir (sudo)"
-      sudo install -m 0755 "$tmp/$BIN" "$dir/$BIN"
+      if [ "$can_sudo" = tty ]; then
+        sudo install -m 0755 "$tmp/$BIN" "$dir/$BIN" </dev/tty
+      else
+        sudo -n install -m 0755 "$tmp/$BIN" "$dir/$BIN"
+      fi
       echo "Installed: $("$dir/$BIN" --version 2>/dev/null || echo "$dir/$BIN")"
       exit 0
     fi
     dir="$HOME/.local/bin"
-    mkdir -p "$dir"
-    echo "No write access to /usr/local/bin; installing to $dir (ensure it is on your PATH)"
+    echo "No terminal for a sudo password; installing to $dir instead (no privileges needed)"
   fi
 fi
 mkdir -p "$dir"
 install -m 0755 "$tmp/$BIN" "$dir/$BIN"
 echo "Installed contro1 to $dir/$BIN"
 "$dir/$BIN" --version 2>/dev/null || true
+found=$(command -v "$BIN" 2>/dev/null || true)
+if [ -n "$found" ] && [ "$found" != "$dir/$BIN" ]; then
+  echo "Note: $found comes first on your PATH and is not the copy just installed. Remove it or put $dir first."
+fi
