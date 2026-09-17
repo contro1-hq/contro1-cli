@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,5 +47,14 @@ func TestDoWithHeadersSendsIdempotencyKey(t *testing.T) {
 	}
 	if got != "k1" {
 		t.Fatalf("Idempotency-Key = %q", got)
+	}
+}
+
+func TestValidationDetailsAreShown(t *testing.T) {
+	var parsed map[string]any
+	_ = json.Unmarshal([]byte(`{"error":"validation_error","message":"Invalid request body","details":[{"field":"tool_calls.0","message":"Unrecognized key: \"arguments\""}]}`), &parsed)
+	_, msg := extractError(parsed, nil)
+	if msg != `Invalid request body (tool_calls.0: Unrecognized key: "arguments")` {
+		t.Fatalf("details must name the field: %q", msg)
 	}
 }

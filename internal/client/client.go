@@ -155,10 +155,10 @@ func extractError(parsed map[string]any, raw []byte) (string, string) {
 			}
 			return code, msg
 		}
-		// {error:"...",message:"..."}
+		// {error:"...",message:"...",details:[{field,message}]}
 		if msg, ok := parsed["message"].(string); ok && msg != "" {
 			code, _ := parsed["error"].(string)
-			return code, msg
+			return code, msg + validationDetails(parsed["details"])
 		}
 		if msg, ok := parsed["error"].(string); ok && msg != "" {
 			return msg, msg
@@ -168,6 +168,37 @@ func extractError(parsed map[string]any, raw []byte) (string, string) {
 		return "", strings.TrimSpace(string(raw))
 	}
 	return "", "request failed"
+}
+
+// validationDetails names the fields a request was refused for. Without them
+// "Invalid request body" leaves the caller guessing which part to fix.
+func validationDetails(raw any) string {
+	items, ok := raw.([]any)
+	if !ok || len(items) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, item := range items {
+		d, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		field, _ := d["field"].(string)
+		message, _ := d["message"].(string)
+		switch {
+		case field != "" && message != "":
+			parts = append(parts, field+": "+message)
+		case message != "":
+			parts = append(parts, message)
+		}
+		if len(parts) == 5 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, "; ") + ")"
 }
 
 func httpExitCode(status int, errCode string) int {
