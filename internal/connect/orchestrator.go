@@ -154,12 +154,15 @@ type State struct {
 // ---------------------------------------------------------------------------
 
 type Options struct {
-	Platform     string
-	APIURL       string
-	Owner        string
-	Resume       string
-	NoWait       bool
-	Yes          bool
+	Platform string
+	APIURL   string
+	Owner    string
+	Resume   string
+	NoWait   bool
+	Yes      bool
+	// Agents are the subjects named with --agent. Their presence is what tells
+	// --yes apart from "and connect whatever discovery happens to find".
+	Agents       []string
 	ConfirmRoles bool
 	Development  bool
 	Repair       bool
@@ -286,6 +289,29 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		for _, c := range o.Adapter.PlanConfig(o.Broker.MappingPath(p)) {
 			lines = append(lines, c.Description+" ("+c.Path+")")
 		}
+		/*
+		 * --yes APPROVES THE LOCAL CHANGES, NOT THE LIST OF IDENTITIES.
+		 *
+		 * Discovery returns every agent the platform has. On a NanoClaw host
+		 * that is every group, including ones whose owner deliberately left
+		 * them unconnected. Letting --yes stand in for "and connect all of
+		 * them" turns a flag people use to skip a file-change prompt into a
+		 * blank cheque over identities, and the mistake is silent: the agents
+		 * are simply connected.
+		 *
+		 * The same rule already applies to NanoClaw role changes, which need a
+		 * confirmation even with --yes. Scope is at least as consequential.
+		 */
+		if opts.Yes && len(opts.Agents) == 0 && len(subjects) > 1 {
+			ns := step(p, runtimeproto.StateNeedsLocalConfirmation,
+				fmt.Sprintf("This computer has %d %s. Name the ones to connect, or drop --yes to choose from a list.", len(subjects), platformNoun(p, len(subjects))))
+			ns.Checks = previewChecks(lines)
+			for _, sub := range subjects {
+				ns.Agents = append(ns.Agents, runtimeproto.AgentState{PlatformName: sub.ID, State: runtimeproto.StateNeedsLocalConfirmation})
+			}
+			ns.NextCommand = o.cmd(opts, "--agent <id>")
+			return ns
+		}
 		if !opts.Yes {
 			if !o.Prompt.Interactive() || !o.Prompt.Confirm("Connect these agents?", lines) {
 				ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Review what will change on this computer, then confirm.")
@@ -330,8 +356,17 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			st.BatchID, st.BatchExpiresAt, st.Items, st.Registered = prepared.BatchID, prepared.ExpiresAt, prepared.Items, false
 			save("prepared")
 
-			// 5. The one elevated phase: install if needed and register keys.
-			o.Prompt.Progress("Setting up the Contro1 service (you may be asked to approve)...")
+			/*
+			 * 5. The one elevated phase.
+			 *
+			 * This asks for an administrator even when the service is already
+			 * installed and answering, because registering an agent's key goes
+			 * through the control channel and control refuses unelevated
+			 * callers by design. Saying "setting up the service" here read as
+			 * a reinstall and sent a reader looking for a broken service
+			 * instead of approving an ordinary administrative act.
+			 */
+			o.Prompt.Progress("Registering the agent keys with the Contro1 service on this computer (administrator approval required)...")
 			creq := broker.ControlConnectionsRequest{APIURL: opts.APIURL, BatchID: prepared.BatchID, ConnectionTicket: prepared.ConnectionTicket, HostFacts: req.Host}
 			for _, it := range prepared.Items {
 				principal, err := o.Adapter.AllowedPrincipal(it.PlatformSubject)
@@ -342,7 +377,7 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			}
 			results, err := o.Broker.Register(ctx, opts.APIURL, creq)
 			if errors.Is(err, installer.ErrElevationDeclined) || errors.Is(err, installer.ErrNeedsElevation) {
-				ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Setting up the Contro1 service needs administrator approval on this computer.")
+				ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Registering an agent key with the local Contro1 service needs an administrator on this computer. The service itself may already be running: its control channel refuses unelevated callers by design.")
 				ns.WaitingFor = &runtimeproto.WaitingFor{Kind: "local_administrator"}
 				ns.NextCommand = o.cmd(opts, "--yes")
 				if hint := installer.SudoHint(o.cmd(opts, "--yes")); hint != "" {
@@ -630,5 +665,22 @@ func ExitCode(ns runtimeproto.NextStep, noWait bool) int {
 		return 4
 	default:
 		return 1
+	}
+}
+
+// platformNoun names what was discovered in the platform's own words, so a
+// person reading the refusal recognises the things it is talking about.
+func platformNoun(platform string, count int) string {
+	switch platform {
+	case "nanoclaw":
+		if count == 1 {
+			return "agent group"
+		}
+		return "agent groups"
+	default:
+		if count == 1 {
+			return "agent"
+		}
+		return "agents"
 	}
 }

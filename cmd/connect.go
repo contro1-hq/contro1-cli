@@ -180,7 +180,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 	ns := o.Run(ctx, connect.Options{
 		Platform: platform, APIURL: strings.TrimRight(apiURL, "/"), Owner: flagConnectOwner, Resume: flagConnectResume,
-		NoWait: flagConnectNoWait, Yes: flagConnectYes, ConfirmRoles: flagConnectConfirmRoles, Development: flagConnectDevelopment,
+		NoWait: flagConnectNoWait, Yes: flagConnectYes, Agents: flagConnectAgents, ConfirmRoles: flagConnectConfirmRoles, Development: flagConnectDevelopment,
 		Repair: flagConnectRepair, Principal: flagConnectPrincipal, HostLabel: host, HostOS: runtime.GOOS, HostArch: runtime.GOARCH, WaitTimeout: 11 * time.Minute,
 	})
 	return renderNextStep(ns)

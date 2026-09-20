@@ -179,7 +179,13 @@ func setup(t *testing.T) (*Orchestrator, *fakeAPI, *fakeBroker, *fakePrompt, *fa
 }
 
 func base() Options {
-	return Options{Platform: "openclaw", APIURL: "https://api.contro1.test", PollEvery: time.Millisecond, WaitTimeout: 50 * time.Millisecond}
+	return Options{
+		Platform: "openclaw", APIURL: "https://api.contro1.test",
+		// Named, because --yes no longer stands in for "connect whatever
+		// discovery found". Scope selection has its own test below.
+		Agents:    []string{"main", "research"},
+		PollEvery: time.Millisecond, WaitTimeout: 50 * time.Millisecond,
+	}
 }
 
 // ---- tests -------------------------------------------------------------------
@@ -338,5 +344,45 @@ func TestConnectSendsReachAndSurvivesAnAdapterThatCannotReadIt(t *testing.T) {
 		if item.Reach != nil {
 			t.Fatalf("an unreadable reach must be omitted, not invented: %+v", item)
 		}
+	}
+}
+
+// A flag people reach for to skip a file-change prompt must not also decide
+// which identities exist on this computer. On a NanoClaw host, discovery
+// returns every group, including ones whose owner deliberately left alone.
+func TestYesDoesNotStandInForChoosingWhichAgentsToConnect(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	opts := base()
+	opts.Agents = nil
+	opts.Yes, opts.NoWait = true, true
+
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateNeedsLocalConfirmation {
+		t.Fatalf("two discovered agents and no --agent must stop: %+v", ns)
+	}
+	if api.prepares != 0 {
+		t.Fatalf("nothing may be prepared before the scope is chosen, got %d", api.prepares)
+	}
+	if !strings.Contains(ns.Message, "2 agents") || !strings.Contains(ns.NextCommand, "--agent") {
+		t.Fatalf("the refusal must say how many and how to choose: %q / %q", ns.Message, ns.NextCommand)
+	}
+	// Both are listed, so the person can see what they would have connected.
+	if len(ns.Agents) != 2 {
+		t.Fatalf("the candidates must be shown: %+v", ns.Agents)
+	}
+
+	// Naming them is the way through, and --yes still covers the local changes.
+	o2, api2, _, _, _ := setup(t)
+	opts.Agents = []string{"main", "research"}
+	if ns := o2.Run(context.Background(), opts); api2.prepares != 1 {
+		t.Fatalf("named agents should proceed: %d prepares, %+v", api2.prepares, ns)
+	}
+
+	// One agent needs no selector: there is nothing to choose between.
+	o3, api3, _, _, adapter3 := setup(t)
+	adapter3.subjects = []platforms.Subject{{ID: "main", Display: "main"}}
+	opts.Agents = nil
+	if ns := o3.Run(context.Background(), opts); api3.prepares != 1 {
+		t.Fatalf("a single agent should proceed without --agent: %d prepares, %+v", api3.prepares, ns)
 	}
 }
