@@ -69,6 +69,15 @@ type Adapter interface {
 	// AllowedPrincipal is the one operating system identity that may reach a
 	// subject's endpoint.
 	AllowedPrincipal(subject string) (string, error)
+	// Reach reports every surface this subject answers on, so the owner can see
+	// who is able to instruct it before granting anything.
+	//
+	// It never blocks a connection. An adapter that cannot enumerate the
+	// surfaces returns Complete=false and, if it wants to explain why, an
+	// error; the caller records both and Contro1 reads an incomplete reach as
+	// a shared surface. Guessing privacy here would be the one failure this
+	// whole mechanism exists to prevent.
+	Reach(ctx context.Context, subject string) (runtimeproto.AgentReach, error)
 	// SafeTest is the suggestion printed once connected.
 	SafeTest() string
 }

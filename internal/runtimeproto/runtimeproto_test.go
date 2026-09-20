@@ -46,3 +46,52 @@ func TestMappingLookupFailsClosed(t *testing.T) {
 		t.Fatal("digest must not depend on order")
 	}
 }
+
+func TestPostureFailsClosed(t *testing.T) {
+	private := ReachContext{ContextID: "c1", Kind: ReachPrivate, ParticipantsKnown: true}
+
+	cases := []struct {
+		name  string
+		reach *AgentReach
+		want  string
+	}{
+		{"nil reach is never trusted", nil, PostureSharedSurface},
+		{"no contexts is not the same as no exposure", &AgentReach{Complete: true}, PostureSharedSurface},
+		{
+			"an incomplete list can only understate exposure",
+			&AgentReach{Complete: false, Contexts: []ReachContext{private}},
+			PostureSharedSurface,
+		},
+		{
+			"one shared surface taints the agent",
+			&AgentReach{Complete: true, Contexts: []ReachContext{
+				private,
+				{ContextID: "c2", Kind: ReachShared, ParticipantsKnown: true},
+			}},
+			PostureSharedSurface,
+		},
+		{
+			"unknown is treated exactly like shared",
+			&AgentReach{Complete: true, Contexts: []ReachContext{{ContextID: "c2", Kind: ReachUnknown, ParticipantsKnown: true}}},
+			PostureSharedSurface,
+		},
+		{
+			"private but open to unnamed people is still shared",
+			&AgentReach{Complete: true, Contexts: []ReachContext{{ContextID: "c2", Kind: ReachPrivate, ParticipantsKnown: false}}},
+			PostureSharedSurface,
+		},
+		{
+			"every surface private and known",
+			&AgentReach{Complete: true, Contexts: []ReachContext{private, {ContextID: "c2", Kind: ReachPrivate, ParticipantsKnown: true}}},
+			PostureSoleOperator,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PostureForReach(tc.reach); got != tc.want {
+				t.Fatalf("PostureForReach = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

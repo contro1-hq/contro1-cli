@@ -38,6 +38,11 @@ type Identity struct {
 type PrepareItem struct {
 	PlatformSubject string `json:"platform_subject"`
 	DisplayName     string `json:"display_name,omitempty"`
+	// Reach is every surface this subject answers on, so the owner approving
+	// the connection can see who is able to instruct it. Omitted when the
+	// adapter could not say, which Contro1 reads as exposure rather than as
+	// privacy, so leaving it out never buys anything.
+	Reach *runtimeproto.AgentReach `json:"reach,omitempty"`
 }
 
 type PrepareRequest struct {
@@ -302,7 +307,14 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			req.Environment = "development"
 		}
 		for _, s := range subjects {
-			req.Items = append(req.Items, PrepareItem{PlatformSubject: s.ID, DisplayName: s.Display})
+			item := PrepareItem{PlatformSubject: s.ID, DisplayName: s.Display}
+			// A reach that cannot be read never blocks a connection. It is
+			// simply not sent, and the agent is treated as reachable by people
+			// Contro1 cannot name until a later run reports otherwise.
+			if reach, err := o.Adapter.Reach(ctx, s.ID); err == nil {
+				item.Reach = &reach
+			}
+			req.Items = append(req.Items, item)
 		}
 		prepared, err := o.API.Prepare(ctx, req)
 		if err != nil {

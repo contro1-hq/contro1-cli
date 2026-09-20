@@ -268,3 +268,72 @@ type EndpointInfo struct {
 	PlatformSubject string `json:"platform_subject"`
 	State           string `json:"state"`
 }
+
+// ---------------------------------------------------------------------------
+// Agent reach: who can instruct an agent
+// ---------------------------------------------------------------------------
+
+// An agent more than one person can instruct, holding standing authority over
+// one person's data, is a confused deputy: it acts with ITS authority and so
+// cannot tell its owner from a stranger who arrived through the same surface.
+//
+// Contro1 never infers this from a platform's architecture. Each adapter
+// REPORTS its reach, and whatever it cannot state is ReachUnknown, which is
+// treated exactly like ReachShared. Silence is never read as privacy.
+const (
+	ReachPrivate = "private"
+	ReachShared  = "shared"
+	ReachUnknown = "unknown"
+)
+
+const (
+	PostureSoleOperator  = "sole_operator"
+	PostureSharedSurface = "shared_surface"
+)
+
+// ReachContext is one surface an agent answers on: a conversation, a host, a
+// gateway.
+type ReachContext struct {
+	// ContextID is stable, opaque and scoped to the platform. It is the binding
+	// key for origin-conditioned grants, so it must be the platform's own
+	// internal id.
+	//
+	// NEVER a phone number, email address or handle: this crosses into Contro1
+	// and is stored. NanoClaw sends its mg-... id, never the WhatsApp JID.
+	ContextID string `json:"context_id"`
+	// Label is display only, for the approval screen.
+	Label string `json:"label,omitempty"`
+	Kind  string `json:"kind"`
+	// ParticipantsKnown is true only when the platform restricts this surface to
+	// an enumerated set of people.
+	ParticipantsKnown bool `json:"participants_known"`
+	// ParticipantCount is set only when the platform actually counts them.
+	// Display only, never a gate.
+	ParticipantCount int `json:"participant_count,omitempty"`
+}
+
+type AgentReach struct {
+	SchemaVersion int    `json:"schema_version"`
+	Platform      string `json:"platform"`
+	ObservedAt    string `json:"observed_at"`
+	// Complete is false when the adapter could not enumerate every surface. A
+	// partial list can only understate exposure, so it is treated as unknown.
+	Complete bool           `json:"complete"`
+	Contexts []ReachContext `json:"contexts"`
+}
+
+// PostureForReach fails closed at every branch. No reach, an incomplete list,
+// one shared surface, or one surface open to unnamed people, and the whole
+// agent is PostureSharedSurface. An agent earns PostureSoleOperator only when
+// every surface it answers on is private AND limited to known people.
+func PostureForReach(reach *AgentReach) string {
+	if reach == nil || !reach.Complete || len(reach.Contexts) == 0 {
+		return PostureSharedSurface
+	}
+	for _, context := range reach.Contexts {
+		if context.Kind != ReachPrivate || !context.ParticipantsKnown {
+			return PostureSharedSurface
+		}
+	}
+	return PostureSoleOperator
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 )
@@ -301,4 +302,188 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Reach
+// ---------------------------------------------------------------------------
+
+// nclData unwraps ncl's {"ok":true,"data":...} envelope. Older builds answered
+// with the bare value, which is accepted too.
+func nclData(out []byte) (json.RawMessage, error) {
+	var env struct {
+		OK    *bool           `json:"ok"`
+		Data  json.RawMessage `json:"data"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &env); err == nil && env.OK != nil {
+		if !*env.OK {
+			return nil, fmt.Errorf("ncl: %s", env.Error.Message)
+		}
+		return env.Data, nil
+	}
+	return out, nil
+}
+
+// localHostReach is the reach of a platform whose only way in is a shell on
+// this computer, as this operating system user.
+//
+// It is `private` because the boundary is enforced by the operating system
+// rather than by anyone's configuration, which makes it the strongest one we
+// have. It stops being true the moment the platform is fronted by anything
+// reachable from elsewhere, so an adapter claims it only while it talks to a
+// local process it started itself.
+func localHostReach(platform, principal string) runtimeproto.AgentReach {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "this computer"
+	}
+	label := platform + " on " + host
+	if principal != "" {
+		label = principal + "@" + host
+	}
+	return runtimeproto.AgentReach{
+		SchemaVersion: runtimeproto.SchemaVersion,
+		Platform:      platform,
+		ObservedAt:    time.Now().UTC().Format(time.RFC3339),
+		Complete:      true,
+		Contexts: []runtimeproto.ReachContext{{
+			ContextID:         "host:" + host,
+			Label:             label,
+			Kind:              runtimeproto.ReachPrivate,
+			ParticipantsKnown: true,
+			ParticipantCount:  1,
+		}},
+	}
+}
+
+// Reach reports an OpenClaw assistant as reachable by people we cannot name.
+//
+// It is tempting to call this private: the bridge talks to OpenClaw over a
+// local socket as one operating system user, and connect runs as that user. But
+// that is who can reach the CREDENTIAL. OpenClaw answers on WhatsApp, Telegram,
+// iMessage, Signal and Slack, any of which can be a group, and nothing this
+// adapter can see says which of them are wired up or who is in them.
+//
+// So the answer is unknown, which Contro1 reads exactly like a group chat.
+// An operator who knows their assistant has no chat channels can say so, and
+// that is a claim with a name behind it rather than a guess with none.
+func (o *openClaw) Reach(_ context.Context, _ string) (runtimeproto.AgentReach, error) {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "this computer"
+	}
+	return runtimeproto.AgentReach{
+		SchemaVersion: runtimeproto.SchemaVersion,
+		Platform:      "openclaw",
+		ObservedAt:    time.Now().UTC().Format(time.RFC3339),
+		Complete:      true,
+		Contexts: []runtimeproto.ReachContext{{
+			ContextID:         "host:" + host,
+			Label:             "OpenClaw on " + host,
+			Kind:              runtimeproto.ReachUnknown,
+			ParticipantsKnown: false,
+		}},
+	}, nil
+}
+
+// Reach for Claude Code is the local host: it is a terminal tool driven by
+// whoever is at the keyboard, with no channel anyone else can message.
+func (c *claudeCode) Reach(_ context.Context, _ string) (runtimeproto.AgentReach, error) {
+	principal, _ := c.AllowedPrincipal("")
+	return localHostReach("claude-code", principal), nil
+}
+
+// Reach lists the conversations wired to one NanoClaw agent group.
+//
+// Two hops, because NanoClaw splits the question: a wiring says which
+// conversation reaches which agent group and on what terms, and the messaging
+// group says whether that conversation is a group chat. Neither alone answers
+// "who can instruct this agent".
+//
+// The WhatsApp JID is deliberately left behind. It is a phone number or a group
+// address, it would be stored in Contro1 and shown on screens, and nothing here
+// needs it: the binding key is NanoClaw's own `mg-` id and the display name is
+// the conversation's name.
+func (n *nanoClaw) Reach(ctx context.Context, subject string) (runtimeproto.AgentReach, error) {
+	reach := runtimeproto.AgentReach{
+		SchemaVersion: runtimeproto.SchemaVersion,
+		Platform:      "nanoclaw",
+		ObservedAt:    time.Now().UTC().Format(time.RFC3339),
+		Complete:      false,
+	}
+	if subject == "" {
+		return reach, errors.New("reach needs an agent group id")
+	}
+
+	out, err := n.opts.Runner(ctx, n.bin(), "wirings", "list", "--json")
+	if err != nil {
+		return reach, fmt.Errorf("could not list NanoClaw wirings with %s wirings list: %w", n.bin(), err)
+	}
+	data, err := nclData(out)
+	if err != nil {
+		return reach, err
+	}
+	// Listed whole and filtered here: the flag spelling for a server-side filter
+	// differs between builds, and reading one agent group's rows out of the full
+	// list cannot silently return a short answer.
+	var wirings []struct {
+		MessagingGroupID string `json:"messaging_group_id"`
+		AgentGroupID     string `json:"agent_group_id"`
+		SenderScope      string `json:"sender_scope"`
+	}
+	if err := json.Unmarshal(data, &wirings); err != nil {
+		return reach, fmt.Errorf("unexpected output from %s wirings list", n.bin())
+	}
+
+	for _, w := range wirings {
+		if w.AgentGroupID != subject || w.MessagingGroupID == "" {
+			continue
+		}
+		// Every conversation starts unknown. It is only downgraded to private
+		// once NanoClaw has said, in this run, that it is not a group chat.
+		entry := runtimeproto.ReachContext{
+			ContextID:         w.MessagingGroupID,
+			Kind:              runtimeproto.ReachUnknown,
+			ParticipantsKnown: w.SenderScope == "known",
+		}
+		if mg, err := n.messagingGroup(ctx, w.MessagingGroupID); err == nil {
+			entry.Label = mg.Name
+			if mg.IsGroup == 0 {
+				entry.Kind = runtimeproto.ReachPrivate
+			} else {
+				entry.Kind = runtimeproto.ReachShared
+			}
+		}
+		reach.Contexts = append(reach.Contexts, entry)
+	}
+
+	// A wiring list that came back whole is a complete answer, including when it
+	// is empty: an agent wired to nothing answers nobody.
+	reach.Complete = true
+	return reach, nil
+}
+
+type nclMessagingGroup struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	IsGroup int    `json:"is_group"`
+}
+
+func (n *nanoClaw) messagingGroup(ctx context.Context, id string) (nclMessagingGroup, error) {
+	var mg nclMessagingGroup
+	out, err := n.opts.Runner(ctx, n.bin(), "messaging-groups", "get", "--id", id, "--json")
+	if err != nil {
+		return mg, err
+	}
+	data, err := nclData(out)
+	if err != nil {
+		return mg, err
+	}
+	if err := json.Unmarshal(data, &mg); err != nil {
+		return mg, fmt.Errorf("unexpected output from %s messaging-groups get", n.bin())
+	}
+	return mg, nil
 }

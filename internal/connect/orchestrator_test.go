@@ -26,6 +26,8 @@ type fakeAPI struct {
 	reports   map[string]string
 	noLogin   bool
 	nextItems []PreparedItem
+	// lastPrepare is what the orchestrator actually put on the wire.
+	lastPrepare PrepareRequest
 }
 
 func (f *fakeAPI) Whoami(context.Context) (*Identity, error) {
@@ -37,6 +39,7 @@ func (f *fakeAPI) Whoami(context.Context) (*Identity, error) {
 
 func (f *fakeAPI) Prepare(_ context.Context, req PrepareRequest) (*PrepareResponse, error) {
 	f.prepares++
+	f.lastPrepare = req
 	items := f.nextItems
 	if items == nil {
 		for i, it := range req.Items {
@@ -127,9 +130,23 @@ type fakeAdapter struct {
 	subjects []platforms.Subject
 	roles    bool
 	applied  int
+	reachErr bool
 }
 
 func (a *fakeAdapter) Name() string { return "openclaw" }
+func (a *fakeAdapter) Reach(context.Context, string) (runtimeproto.AgentReach, error) {
+	if a.reachErr {
+		return runtimeproto.AgentReach{}, errors.New("cannot read reach")
+	}
+	return runtimeproto.AgentReach{
+		SchemaVersion: runtimeproto.SchemaVersion,
+		Platform:      "openclaw",
+		Complete:      true,
+		Contexts: []runtimeproto.ReachContext{
+			{ContextID: "chat-1", Label: "Berlin trip", Kind: runtimeproto.ReachShared},
+		},
+	}, nil
+}
 func (a *fakeAdapter) Discover(context.Context) (platforms.Instance, []platforms.Subject, error) {
 	return platforms.Instance{Digest: "inst-1", Label: "OpenClaw"}, a.subjects, nil
 }
@@ -289,5 +306,37 @@ func TestDeclinedByOwner(t *testing.T) {
 	opts.Yes = true
 	if ns := o.Run(context.Background(), opts); ns.State != runtimeproto.StateBlocked {
 		t.Fatalf("%+v", ns)
+	}
+}
+
+// The owner approving a connection has to be able to see who can instruct what
+// they are taking responsibility for, so the reach travels with the prepare.
+func TestConnectSendsReachAndSurvivesAnAdapterThatCannotReadIt(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	opts := base()
+	opts.Yes, opts.NoWait = true, true
+	_ = o.Run(context.Background(), opts)
+	if len(api.lastPrepare.Items) == 0 {
+		t.Fatalf("no prepare was sent")
+	}
+	for _, item := range api.lastPrepare.Items {
+		if item.Reach == nil {
+			t.Fatalf("reach was not sent for %s", item.PlatformSubject)
+		}
+		if got := runtimeproto.PostureForReach(item.Reach); got != runtimeproto.PostureSharedSurface {
+			t.Fatalf("posture = %q, want shared_surface", got)
+		}
+	}
+
+	// An adapter that cannot read the reach must not stop the connection: the
+	// field is simply absent, and the server reads absence as exposure rather
+	// than inventing a verdict.
+	o2, api2, _, _, adapter2 := setup(t)
+	adapter2.reachErr = true
+	_ = o2.Run(context.Background(), opts)
+	for _, item := range api2.lastPrepare.Items {
+		if item.Reach != nil {
+			t.Fatalf("an unreadable reach must be omitted, not invented: %+v", item)
+		}
 	}
 }
