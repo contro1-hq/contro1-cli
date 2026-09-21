@@ -127,7 +127,9 @@ func init() {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 			if status.EndpointMode != "agent_runtime" {
-				url := fmt.Sprintf("%s/agents/%s", frontendURL(), conn.AgentID)
+				// The setup page, which is where allowing applications lives. Not a
+				// generic agent page: this link exists to get one decision made.
+				url := fmt.Sprintf("%s/agents/setup?ids=%s", frontendURL(), conn.AgentID)
 				prompt.Progress(fmt.Sprintf(
 					"This connection is %q. Its owner has to allow applications, and choose which ones, in Contro1.",
 					status.ModeLabel))
