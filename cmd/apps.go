@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -65,16 +66,41 @@ func fetchRuntimeStatus(ctx context.Context, conn platforms.LocalConnection) (ru
 	if resp.StatusCode != http.StatusOK {
 		return out, fmt.Errorf("the Contro1 service answered %d for this agent", resp.StatusCode)
 	}
-	var body struct {
-		Credential runtimeStatus `json:"credential"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
 		return out, err
 	}
-	if body.Credential.EndpointMode == "" {
-		return out, errors.New("the Contro1 service did not report this connection's mode")
+	/*
+	 * The credential description lives under `auth`. It was read from
+	 * `credential` once, which decodes to an empty struct rather than an error,
+	 * so a working service produced "did not report this connection's mode" and
+	 * sent somebody looking for a broken broker. Both names are accepted now,
+	 * and a shape that carries neither says so with what it did receive, which
+	 * is the part that was missing.
+	 */
+	var body struct {
+		Auth       *runtimeStatus `json:"auth"`
+		Credential *runtimeStatus `json:"credential"`
 	}
-	return body.Credential, nil
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return out, fmt.Errorf("the Contro1 service answered something this version cannot read: %w", err)
+	}
+	for _, candidate := range []*runtimeStatus{body.Auth, body.Credential} {
+		if candidate != nil && candidate.EndpointMode != "" {
+			return *candidate, nil
+		}
+	}
+	return out, fmt.Errorf("the Contro1 service did not report this connection's mode. It answered: %s", truncateForError(string(raw)))
+}
+
+// truncateForError keeps an unexpected body short enough to read and short
+// enough not to paste a wall of JSON into somebody's terminal.
+func truncateForError(body string) string {
+	body = strings.TrimSpace(body)
+	if len(body) > 300 {
+		return body[:300] + "..."
+	}
+	return body
 }
 
 func init() {
