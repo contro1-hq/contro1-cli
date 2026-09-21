@@ -453,6 +453,19 @@ func (n *nanoClaw) Reach(ctx context.Context, subject string) (runtimeproto.Agen
 			entry.Label = mg.Name
 			if mg.IsGroup == 0 {
 				entry.Kind = runtimeproto.ReachPrivate
+				/*
+				 * A DIRECT MESSAGE BOUNDS ITS OWN PARTICIPANTS.
+				 *
+				 * sender_scope defaults to "all", which in a group means
+				 * "answer everyone in the room" and is exactly the exposure
+				 * worth refusing. In a one to one chat it means "answer the one
+				 * person who can write here", because only one person can.
+				 * Reading the default literally marked every ordinary DM as a
+				 * shared surface, which blocked a personal account from an
+				 * agent nobody but its owner could reach. A control that
+				 * refuses the safe case is a control people switch off.
+				 */
+				entry.ParticipantsKnown = true
 			} else {
 				entry.Kind = runtimeproto.ReachShared
 			}

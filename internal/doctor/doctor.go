@@ -38,7 +38,24 @@ type Env interface {
 	// ControlMapPreview runs the no-side-effect round trip.
 	ControlMapPreview(ctx context.Context, entry runtimeproto.MappingEntry) error
 	PlatformUser(platform string) string
+	// McpServers returns how the platform is configured to reach Contro1's MCP
+	// server for one subject, as the platform itself reports it. Empty when
+	// none is configured, which is ordinary: applications are opt in.
+	McpServers(ctx context.Context, platform, subject string) ([]McpServerConfig, error)
+	// ContainerMounts returns the host paths mounted into a subject's
+	// container. Empty on platforms that do not use containers.
+	ContainerMounts(ctx context.Context, platform, subject string) ([]string, error)
 	Development() bool
+}
+
+// McpServerConfig is one configured MCP server, flattened to what matters here.
+type McpServerConfig struct {
+	Name    string
+	Command string
+	Args    []string
+	// URL is set when the entry reaches a server over the network instead of
+	// running one locally. For Contro1 that is the older, key-based setup.
+	URL string
 }
 
 type Report struct {
@@ -123,6 +140,12 @@ func Run(ctx context.Context, env Env, platform string) Report {
 				NextCommand: fmt.Sprintf("contro1 connect %s --agent %s", platform, missing[0])})
 		} else {
 			add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckOK, Message: fmt.Sprintf("%d agent(s) mapped exactly.", len(discovered))})
+		}
+	}
+
+	if mapping != nil {
+		for _, e := range mapping.Entries {
+			addApplicationChecks(ctx, &r, env, platform, e)
 		}
 	}
 
@@ -224,4 +247,83 @@ func actorFor(r *runtimeproto.Remediation) string {
 		return r.Who.Role
 	}
 	return "you"
+}
+
+/*
+Two ways an agent ends up believing it can reach applications when it cannot.
+
+Both are quiet, which is what makes them worth a check. Seen in the field: an
+agent kept an MCP entry pointing at the public API with no key, answered 401 to
+every call, and told its owner over chat that it was connected. Its owner went
+looking for a wrong address for an afternoon. Nothing had the whole picture,
+because the MCP entry lives in the platform and the endpoint lives here.
+
+Neither is a failure when no MCP server is configured at all. Applications are
+opt in, and an agent that only asks for approvals is finished and correct.
+*/
+func addApplicationChecks(ctx context.Context, r *Report, env Env, platform string, e runtimeproto.MappingEntry) {
+	id := "applications:" + e.PlatformSubject
+	label := "Applications for " + e.PlatformSubject
+
+	servers, err := env.McpServers(ctx, platform, e.PlatformSubject)
+	if err != nil {
+		// Not knowing is not a finding. The platform may simply not report it.
+		return
+	}
+	var ours *McpServerConfig
+	for i := range servers {
+		if strings.EqualFold(servers[i].Name, "contro1") {
+			ours = &servers[i]
+			break
+		}
+	}
+	if ours == nil {
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckOK,
+			Message:     "Not set up, which is fine: this agent asks for approvals only.",
+			NextCommand: fmt.Sprintf("contro1 apps enable %s --agent %s", platform, e.PlatformSubject),
+		})
+		return
+	}
+
+	// The older setup reached api.contro1.com with a key somebody pasted in. It
+	// is not merely outdated: the agent then acts as whoever owns that key
+	// rather than as itself, and when the key is absent every call is a 401
+	// that reads to the agent like a misconfigured address.
+	if ours.URL != "" || !strings.EqualFold(ours.Command, "contro1") {
+		where := ours.URL
+		if where == "" {
+			where = ours.Command
+		}
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message:     "The Contro1 MCP server here still points at " + where + ". It carries no agent identity and will answer 401.",
+			NextCommand: fmt.Sprintf("contro1 apps enable %s --agent %s", platform, e.PlatformSubject),
+		})
+		return
+	}
+
+	// The entry is right, and on a container platform it still cannot work
+	// unless this agent's own socket reaches inside.
+	mounts, err := env.ContainerMounts(ctx, platform, e.PlatformSubject)
+	if err != nil || len(mounts) == 0 {
+		return
+	}
+	socket := strings.TrimPrefix(e.Endpoint, "unix://")
+	mounted := false
+	for _, m := range mounts {
+		if m == socket {
+			mounted = true
+			break
+		}
+	}
+	if !mounted {
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message:     "The MCP server is configured but this agent's endpoint is not mounted into its container, so every call fails as soon as it restarts.",
+			NextCommand: fmt.Sprintf("contro1 apps enable %s --agent %s", platform, e.PlatformSubject),
+		})
+		return
+	}
+	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Set up, pointed at this agent's own connection."})
 }

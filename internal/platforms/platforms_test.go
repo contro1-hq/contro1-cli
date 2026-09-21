@@ -143,7 +143,7 @@ func TestNanoClawDiscoveryReadsNclEnvelope(t *testing.T) {
 func TestNanoClawReachSeparatesGroupsFromDMs(t *testing.T) {
 	runner := fakeRunner(map[string]string{
 		"ncl wirings list --json": `{"ok":true,"data":[
-			{"messaging_group_id":"mg-1788291512617-dnnhf4","agent_group_id":"ag-nano","sender_scope":"known"},
+			{"messaging_group_id":"mg-1788291512617-dnnhf4","agent_group_id":"ag-nano","sender_scope":"all"},
 			{"messaging_group_id":"mg-1789143915243-9lrv08","agent_group_id":"ag-nano","sender_scope":"all"},
 			{"messaging_group_id":"mg-other","agent_group_id":"ag-someone-else","sender_scope":"all"}
 		]}`,
@@ -159,8 +159,11 @@ func TestNanoClawReachSeparatesGroupsFromDMs(t *testing.T) {
 	if !reach.Complete || len(reach.Contexts) != 2 {
 		t.Fatalf("another agent group's wiring leaked in: %+v", reach)
 	}
+	// sender_scope "all" is NanoClaw's default and means "answer everyone in the
+	// room". In a one to one chat there is only one person who can write, so it
+	// is not exposure and must not be read as any.
 	if reach.Contexts[0].Kind != runtimeproto.ReachPrivate || !reach.Contexts[0].ParticipantsKnown {
-		t.Fatalf("DM should be private and known: %+v", reach.Contexts[0])
+		t.Fatalf("a DM bounds its own participants whatever sender_scope says: %+v", reach.Contexts[0])
 	}
 	if reach.Contexts[1].Kind != runtimeproto.ReachShared || reach.Contexts[1].Label != "Berlin trip" {
 		t.Fatalf("group chat should be shared: %+v", reach.Contexts[1])
@@ -349,5 +352,111 @@ func TestOneBadFileDoesNotHideTheGoodOnes(t *testing.T) {
 	connections, problems := LocalConnections()
 	if len(connections) != 1 || len(problems) != 1 {
 		t.Fatalf("the damaged file should be reported, not swallowed: %d connections, %d problems", len(connections), len(problems))
+	}
+}
+
+// The live case that exposed this: two one to one conversations, NanoClaw's
+// default sender_scope, and an agent only its owner can reach. Marking that a
+// shared surface blocked a personal account for no reason.
+func TestAnAgentInOnlyDirectMessagesIsSoleOperator(t *testing.T) {
+	a, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: fakeRunner(map[string]string{
+		"ncl wirings list --json": `{"ok":true,"data":[
+			{"messaging_group_id":"mg-whatsapp","agent_group_id":"ag-nano","sender_scope":"all"},
+			{"messaging_group_id":"mg-cli","agent_group_id":"ag-nano","sender_scope":"all"}
+		]}`,
+		"ncl messaging-groups get --id mg-whatsapp --json": `{"ok":true,"data":{"id":"mg-whatsapp","name":null,"is_group":0}}`,
+		"ncl messaging-groups get --id mg-cli --json":      `{"ok":true,"data":{"id":"mg-cli","name":"Local CLI","is_group":0}}`,
+	})})
+	reach, err := a.Reach(context.Background(), "ag-nano")
+	if err != nil {
+		t.Fatalf("reach: %v", err)
+	}
+	if got := runtimeproto.PostureForReach(&reach); got != runtimeproto.PostureSoleOperator {
+		t.Fatalf("posture = %q, want sole_operator: %+v", got, reach.Contexts)
+	}
+
+	// A group chat with the same default is still exposure, which is the whole
+	// distinction: the room decides, not the flag.
+	b, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: fakeRunner(map[string]string{
+		"ncl wirings list --json":                      `{"ok":true,"data":[{"messaging_group_id":"mg-trip","agent_group_id":"ag-nano","sender_scope":"all"}]}`,
+		"ncl messaging-groups get --id mg-trip --json": `{"ok":true,"data":{"id":"mg-trip","name":"Berlin trip","is_group":1}}`,
+	})})
+	groupReach, _ := b.Reach(context.Background(), "ag-nano")
+	if got := runtimeproto.PostureForReach(&groupReach); got != runtimeproto.PostureSharedSurface {
+		t.Fatalf("a group with sender_scope all is still shared: %q", got)
+	}
+}
+
+// The container is where this silently fails: the MCP server runs inside it,
+// and without the mounts it starts, finds nothing and answers 401 forever while
+// the agent reports that it is connected.
+func TestNanoClawApplicationsMountsOnlyThisAgentsSocket(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "ep_sales.sock")
+	if err := os.WriteFile(socket, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := LocalConnection{
+		Platform: "nanoclaw", PlatformSubject: "ag-sales", DisplayName: "Nano ariel",
+		AgentID: "agt_sales", Endpoint: "unix://" + socket,
+	}
+
+	var ran [][]string
+	a, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		ran = append(ran, args)
+		return []byte("{}"), nil
+	}})
+
+	changes := a.ApplicationChanges(conn)
+	if len(changes) != 4 {
+		t.Fatalf("mounts, server and restart are all needed: %d changes", len(changes))
+	}
+	journal := &Journal{}
+	if err := a.ApplyApplications(context.Background(), conn, journal); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	joined := ""
+	for _, args := range ran {
+		joined += strings.Join(args, " ") + "\n"
+	}
+	// Only this agent's socket. A wider mount would let the group act as another.
+	if !strings.Contains(joined, "add-mount --id ag-sales --host "+socket) {
+		t.Fatalf("the agent's own socket is not mounted:\n%s", joined)
+	}
+	if !strings.Contains(joined, "--container /usr/local/bin/contro1 --ro") {
+		t.Fatalf("the binary is not mounted read only:\n%s", joined)
+	}
+	// An older entry, including one holding an API key, must not survive.
+	removeAt, addAt := strings.Index(joined, "remove-mcp-server"), strings.Index(joined, "add-mcp-server")
+	if removeAt < 0 || addAt < 0 || removeAt > addAt {
+		t.Fatalf("the old server must be removed before the new one is added:\n%s", joined)
+	}
+	if !strings.Contains(joined, `["mcp","serve","--agent","ag-sales"]`) {
+		t.Fatalf("the server must be pinned to this agent:\n%s", joined)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(joined), "groups restart --id ag-sales") {
+		t.Fatalf("the group must restart last:\n%s", joined)
+	}
+	if len(journal.RoleCommands) < 4 {
+		t.Fatalf("every applied step is journalled: %v", journal.RoleCommands)
+	}
+}
+
+// Mounting a path that is not there produces a container that starts and fails
+// at the first call, which is the failure mode this command exists to remove.
+func TestNanoClawApplicationsRefusesWhenTheEndpointIsMissing(t *testing.T) {
+	conn := LocalConnection{Platform: "nanoclaw", PlatformSubject: "ag-x", Endpoint: "unix:///run/contro1/ep/not-there.sock"}
+	var ran int
+	a, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		ran++
+		return nil, nil
+	}})
+	err := a.ApplyApplications(context.Background(), conn, &Journal{})
+	if err == nil || !strings.Contains(err.Error(), "doctor") {
+		t.Fatalf("a missing endpoint must stop and point somewhere useful: %v", err)
+	}
+	if ran != 0 {
+		t.Fatalf("nothing may be changed before the endpoint is known to exist, ran %d", ran)
 	}
 }

@@ -78,6 +78,16 @@ type Adapter interface {
 	// a shared surface. Guessing privacy here would be the one failure this
 	// whole mechanism exists to prevent.
 	Reach(ctx context.Context, subject string) (runtimeproto.AgentReach, error)
+	// ApplicationChanges lists what has to change locally for this agent to
+	// reach company applications through Contro1's MCP server. Empty when the
+	// platform needs nothing.
+	//
+	// Separate from PlanConfig because it is a separate decision made later.
+	// Connecting an agent is about approvals; letting it read a mailbox is not
+	// something anybody should acquire by running one more command they did not
+	// read closely.
+	ApplicationChanges(conn LocalConnection) []Change
+	ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error
 	// SafeTest is the suggestion printed once connected.
 	SafeTest() string
 }

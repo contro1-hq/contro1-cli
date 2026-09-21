@@ -2,14 +2,18 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerpaths"
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
+	"github.com/contro1-hq/contro1-cli/internal/doctor"
 	"github.com/contro1-hq/contro1-cli/internal/installer"
 	"github.com/contro1-hq/contro1-cli/internal/localipc"
 	"github.com/contro1-hq/contro1-cli/internal/output"
@@ -152,4 +156,73 @@ func remediationOf(err error) *runtimeproto.Remediation {
 		return ee.Remediation
 	}
 	return nil
+}
+
+/*
+How the platform is configured to reach Contro1, asked of the platform.
+
+Read only, and a platform that cannot answer produces no finding rather than a
+guess: `doctor` reporting a problem it inferred would be worse than reporting
+nothing, because somebody would go and fix the wrong thing.
+*/
+func (e *systemDoctorEnv) McpServers(ctx context.Context, platform, subject string) ([]doctor.McpServerConfig, error) {
+	if platform != "nanoclaw" {
+		return nil, errors.New("not reported by this platform")
+	}
+	out, err := platforms.ExecRunner(ctx, nclBinary(), "config", "get", "--id", subject, "--json")
+	if err != nil {
+		return nil, err
+	}
+	var frame struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			McpServers []struct {
+				Name    string   `json:"name"`
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+				URL     string   `json:"url"`
+			} `json:"mcp_servers"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &frame); err != nil || !frame.OK {
+		return nil, errors.New("could not read the platform's MCP configuration")
+	}
+	servers := make([]doctor.McpServerConfig, 0, len(frame.Data.McpServers))
+	for _, s := range frame.Data.McpServers {
+		servers = append(servers, doctor.McpServerConfig{Name: s.Name, Command: s.Command, Args: s.Args, URL: s.URL})
+	}
+	return servers, nil
+}
+
+func (e *systemDoctorEnv) ContainerMounts(ctx context.Context, platform, subject string) ([]string, error) {
+	if platform != "nanoclaw" {
+		return nil, nil
+	}
+	out, err := platforms.ExecRunner(ctx, nclBinary(), "config", "get", "--id", subject, "--json")
+	if err != nil {
+		return nil, err
+	}
+	var frame struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			AdditionalMounts []struct {
+				HostPath string `json:"hostPath"`
+			} `json:"additional_mounts"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &frame); err != nil || !frame.OK {
+		return nil, errors.New("could not read the platform's container configuration")
+	}
+	paths := make([]string, 0, len(frame.Data.AdditionalMounts))
+	for _, m := range frame.Data.AdditionalMounts {
+		paths = append(paths, m.HostPath)
+	}
+	return paths, nil
+}
+
+func nclBinary() string {
+	if v := strings.TrimSpace(os.Getenv("CONTRO1_NCL_BIN")); v != "" {
+		return v
+	}
+	return "ncl"
 }

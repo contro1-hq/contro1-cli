@@ -23,6 +23,20 @@ type fakeEnv struct {
 	agentFor                      map[string]string
 	remediation                   *runtimeproto.Remediation
 	development                   bool
+	mcpServers                    []McpServerConfig
+	mcpErr                        error
+	mounts                        []string
+}
+
+func (f *fakeEnv) McpServers(context.Context, string, string) ([]McpServerConfig, error) {
+	if f.mcpErr != nil {
+		return nil, f.mcpErr
+	}
+	return f.mcpServers, nil
+}
+
+func (f *fakeEnv) ContainerMounts(context.Context, string, string) ([]string, error) {
+	return f.mounts, nil
 }
 
 func (f *fakeEnv) GOOS() string { return "windows" }
@@ -196,5 +210,73 @@ func TestUserPrimaryGroupIsNotExposure(t *testing.T) {
 	env.principals["ep-b"] = []string{"gid-a"}
 	if c := find(Run(context.Background(), env, "nanoclaw"), "endpoint_isolation:group-b"); c.Status != runtimeproto.CheckBlocked {
 		t.Fatalf("another user's group is exposure: %+v", c)
+	}
+}
+
+func findCheck(r Report, id string) (runtimeproto.Check, bool) {
+	for _, c := range r.Checks {
+		if c.ID == id {
+			return c, true
+		}
+	}
+	return runtimeproto.Check{}, false
+}
+
+// Both of these were seen in the field, and both are quiet: the agent reports
+// that it is connected and answers 401 to everything. Nothing had the whole
+// picture, because the MCP entry lives in the platform and the endpoint here.
+func TestApplicationsChecksCatchTheQuietFailures(t *testing.T) {
+	// No MCP server at all is not a problem. Applications are opt in, and an
+	// agent that only asks for approvals is finished and correct.
+	env := healthy()
+	r := Run(context.Background(), env, "nanoclaw")
+	c, ok := findCheck(r, "applications:group-a")
+	if !ok || c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "approvals only") {
+		t.Fatalf("an approvals-only agent must not look broken: %+v", c)
+	}
+
+	// The older setup: an entry reaching the public API with a key somebody
+	// pasted in. The agent then acts as whoever owns that key, and without one
+	// every call is a 401 that reads like a wrong address.
+	env = healthy()
+	env.mcpServers = []McpServerConfig{{Name: "contro1", URL: "https://api.contro1.com/mcp"}}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "applications:group-a")
+	if c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "401") {
+		t.Fatalf("a legacy URL entry must be reported: %+v", c)
+	}
+	if !strings.Contains(c.NextCommand, "apps enable") {
+		t.Fatalf("and it must say how to fix it: %q", c.NextCommand)
+	}
+
+	// The entry is right but the socket never reaches inside the container, so
+	// it works until the next restart and then never again.
+	env = healthy()
+	env.mcpServers = []McpServerConfig{{Name: "contro1", Command: "contro1", Args: []string{"mcp", "serve"}}}
+	env.mounts = []string{"/some/other/path"}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "applications:group-a")
+	if c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "not mounted") {
+		t.Fatalf("a missing mount must be reported: %+v", c)
+	}
+
+	// Correctly set up: the entry runs contro1 and this agent's own socket is
+	// mounted.
+	env = healthy()
+	env.mcpServers = []McpServerConfig{{Name: "contro1", Command: "contro1", Args: []string{"mcp", "serve"}}}
+	env.mounts = []string{"ep-a"}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "applications:group-a")
+	if c.Status != runtimeproto.CheckOK {
+		t.Fatalf("a correct setup must pass: %+v", c)
+	}
+
+	// A platform that cannot answer produces no finding at all. Reporting a
+	// problem we inferred would send somebody to fix the wrong thing.
+	env = healthy()
+	env.mcpErr = errors.New("not reported by this platform")
+	r = Run(context.Background(), env, "nanoclaw")
+	if _, ok := findCheck(r, "applications:group-a"); ok {
+		t.Fatal("silence from the platform must not become a finding")
 	}
 }
