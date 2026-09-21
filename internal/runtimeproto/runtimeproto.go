@@ -186,6 +186,10 @@ var approvalsOnlyRoutes = []DataRoute{
 	{"GET", "/api/centcom/v1/requests/:id"},
 	{"DELETE", "/api/centcom/v1/requests/:id"},
 	{"POST", "/api/centcom/v1/audit-records"},
+	// An agent saying how exposed it is. On the approvals-only list because
+	// the answer matters most for a connection that has not been widened yet,
+	// and because the server only ever lets a declaration tighten things.
+	{"POST", "/api/centcom/v1/runtime/reach"},
 	{"POST", "/mcp"},
 	{"GET", "/broker/v1/endpoint"},
 }

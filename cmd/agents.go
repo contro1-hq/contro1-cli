@@ -36,7 +36,30 @@ func init() {
 	getCmd := &cobra.Command{Use: "get <agent_id>", Short: "Get one agent", Args: cobra.ExactArgs(1), RunE: runAgentGet}
 	trailCmd := &cobra.Command{Use: "trail <agent_id>", Short: "Show an agent's action trail", Args: cobra.ExactArgs(1), RunE: runAgentTrail}
 
-	agentsCmd.AddCommand(registerCmd, listCmd, getCmd, trailCmd)
+	/*
+	 * Telling Contro1 who can instruct this agent.
+	 *
+	 * Runtime only, on the agent's own connection, because the answer is about
+	 * this agent and nobody else's. It is what a platform adapter calls when it
+	 * notices the agent was added to a room since it was connected: NanoClaw
+	 * asks that in a DM, long after anybody decided what the agent may reach,
+	 * and answering it casually is how a private assistant becomes one a group
+	 * can instruct.
+	 *
+	 * The server only ever lets a declaration tighten things. An agent cannot
+	 * talk its way back to being private, and this command does not pretend to.
+	 */
+	reachCmd := &cobra.Command{
+		Use:   "reach",
+		Short: "Report which conversations this agent answers in",
+		Long: "Reads {\"contexts\":[{context_id,label,kind,participants_known}]} from --file. " +
+			"Only ever makes this agent stricter: privacy is established by a person, with contro1 connect.",
+		RunE: runAgentReach,
+	}
+	reachCmd.Flags().StringVar(&agentReachFile, "file", "", "JSON file, or - for stdin (required)")
+	_ = reachCmd.MarkFlagRequired("file")
+
+	agentsCmd.AddCommand(registerCmd, listCmd, getCmd, trailCmd, reachCmd)
 	rootCmd.AddCommand(agentsCmd)
 }
 
@@ -121,4 +144,22 @@ func agentDetailTable(m map[string]any) *output.Table {
 			{"requests", str(m["request_count"])},
 		},
 	}
+}
+
+var agentReachFile string
+
+func runAgentReach(_ *cobra.Command, _ []string) error {
+	body, err := readJSONMap(agentReachFile, "reach")
+	if err != nil {
+		return err
+	}
+	c, pr, _, err := newRuntimeClient()
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do("POST", "/api/centcom/v1/runtime/reach", body)
+	if err != nil {
+		return err
+	}
+	return output.Render(outFormat(pr), resp, nil)
 }
