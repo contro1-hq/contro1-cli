@@ -158,3 +158,34 @@ func (c *claudeCode) ApplyApplications(ctx context.Context, conn LocalConnection
 	j.RoleCommands = append(j.RoleCommands, "claude "+strings.Join(args, " "))
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// What connecting does not finish
+// ---------------------------------------------------------------------------
+
+/*
+NanoClaw needs Contro1 installed into it before any approval is routed.
+
+This is not automated here, and the choice is deliberate. Two of these steps
+write TypeScript into NanoClaw's own source tree and one edits how NanoClaw
+delivers approvals. That is the person's code, and a tool that reaches into it
+from a release of a different project is a tool nobody can reason about when
+something later breaks. Naming the steps at the moment they become relevant is
+worth more than doing them invisibly.
+*/
+func (n *nanoClaw) RemainingSetup() []string {
+	return []string{
+		"Install the Contro1 channel into NanoClaw: copy contro1.ts and contro1-governance.ts into src/channels/ and add the import. See skills/add-contro1 in the connector.",
+		"Make approval cards prefer Contro1, so a card raised in WhatsApp still comes here (step 4 of that skill).",
+		"Build and restart NanoClaw.",
+		"Make Contro1 an approver: contro1 connect nanoclaw --confirm-roles",
+		"Check it: contro1 doctor nanoclaw",
+	}
+}
+
+// The OpenClaw bridge is the approver by being deployed; nothing is installed
+// into OpenClaw itself.
+func (o *openClaw) RemainingSetup() []string { return nil }
+
+// Claude Code is governed by the hook the connector installs, not by a channel.
+func (c *claudeCode) RemainingSetup() []string { return nil }

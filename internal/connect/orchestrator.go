@@ -576,7 +576,34 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		ns.NextCommand = "contro1 doctor " + p
 		return ns
 	}
+	/*
+	 * CONNECTED IS NOT THE SAME AS GOVERNED, and saying so here is the point.
+	 *
+	 * A connection gives Contro1 a credential and an endpoint. On NanoClaw it
+	 * takes two more things a person does by hand before a single approval
+	 * arrives: the channel has to be loaded into the host, and Contro1 has to
+	 * hold a role in the group. Skip either and everything reports success
+	 * while nothing is governed, which is the most expensive kind of green.
+	 *
+	 * So the last word of a successful connect names what is still missing,
+	 * rather than leaving somebody to discover it from the absence of
+	 * approvals that were never going to come.
+	 */
+	remaining := o.Adapter.RemainingSetup()
 	ns.Message = fmt.Sprintf("%s is connected (%d agent(s), Approvals only). %s", instanceLabel(p), len(mapping.Entries), o.Adapter.SafeTest())
+	if len(remaining) > 0 {
+		ns.Message = fmt.Sprintf("%s is connected (%d agent(s), Approvals only), but approvals will not reach Contro1 yet.", instanceLabel(p), len(mapping.Entries))
+		for i, step := range remaining {
+			ns.Checks = append(ns.Checks, runtimeproto.Check{
+				ID:      fmt.Sprintf("remaining_%d", i+1),
+				Label:   "Still to do",
+				Status:  runtimeproto.CheckWaiting,
+				Actor:   "you",
+				Message: step,
+			})
+		}
+		ns.NextCommand = "contro1 doctor " + p
+	}
 	return ns
 }
 

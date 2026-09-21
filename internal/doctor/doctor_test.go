@@ -23,6 +23,8 @@ type fakeEnv struct {
 	agentFor                      map[string]string
 	remediation                   *runtimeproto.Remediation
 	development                   bool
+	approver                      ApproverStatus
+	approverErr                   error
 	mcpServers                    []McpServerConfig
 	mcpErr                        error
 	mounts                        []string
@@ -37,6 +39,13 @@ func (f *fakeEnv) McpServers(context.Context, string, string) ([]McpServerConfig
 
 func (f *fakeEnv) ContainerMounts(context.Context, string, string) ([]string, error) {
 	return f.mounts, nil
+}
+
+func (f *fakeEnv) ApproverStatus(context.Context, string, string) (ApproverStatus, error) {
+	if f.approverErr != nil {
+		return ApproverStatus{}, f.approverErr
+	}
+	return f.approver, nil
 }
 
 func (f *fakeEnv) GOOS() string { return "windows" }
@@ -89,6 +98,7 @@ func healthy() *fakeEnv {
 		principals: map[string][]string{"ep-a": {"uid-a"}, "ep-b": {"uid-b"}},
 		expected:   map[string]string{"group-a": "uid-a", "group-b": "uid-b"},
 		agentFor:   map[string]string{"ep-a": "agt_a", "ep-b": "agt_b"},
+		approver:   ApproverStatus{ChannelPresent: true, ApproverExists: true, ApproverMayResolve: true},
 	}
 }
 
@@ -277,6 +287,49 @@ func TestApplicationsChecksCatchTheQuietFailures(t *testing.T) {
 	env.mcpErr = errors.New("not reported by this platform")
 	r = Run(context.Background(), env, "nanoclaw")
 	if _, ok := findCheck(r, "applications:group-a"); ok {
+		t.Fatal("silence from the platform must not become a finding")
+	}
+}
+
+// Connected is not the same as governed. A NanoClaw host can hold a live
+// connection while the channel was never loaded, and then every other check
+// passes and not one approval is ever seen.
+func TestApproverChecksSeparateConnectedFromGoverned(t *testing.T) {
+	env := healthy()
+	r := Run(context.Background(), env, "nanoclaw")
+	c, ok := findCheck(r, "approvals_reach_contro1:group-a")
+	if !ok || c.Status != runtimeproto.CheckOK {
+		t.Fatalf("a fully set up host must pass: %+v", c)
+	}
+
+	// The channel was never installed. Blocked, not repairable: it copies code
+	// into the platform's own source tree and that is the person's to do.
+	env = healthy()
+	env.approver = ApproverStatus{}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "approvals_reach_contro1:group-a")
+	if c.Status != runtimeproto.CheckBlocked || !strings.Contains(c.Message, "no approval will ever reach") {
+		t.Fatalf("a missing channel must be blocked and say why: %+v", c)
+	}
+
+	// The channel is there but Contro1 is not an approver of this group, so
+	// this group's cards go somewhere else while its neighbour's arrive.
+	env = healthy()
+	env.approver = ApproverStatus{ChannelPresent: true, ApproverExists: true}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "approvals_reach_contro1:group-a")
+	if c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.NextCommand, "--confirm-roles") {
+		t.Fatalf("a missing role must be repairable and name the command: %+v", c)
+	}
+	if !strings.Contains(c.NextCommand, "group-a") {
+		t.Fatalf("the grant is per group, so the repair must name one: %q", c.NextCommand)
+	}
+
+	// A platform that cannot answer produces no finding.
+	env = healthy()
+	env.approverErr = errors.New("not reported by this platform")
+	r = Run(context.Background(), env, "nanoclaw")
+	if _, ok := findCheck(r, "approvals_reach_contro1:group-a"); ok {
 		t.Fatal("silence from the platform must not become a finding")
 	}
 }

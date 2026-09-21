@@ -45,7 +45,33 @@ type Env interface {
 	// ContainerMounts returns the host paths mounted into a subject's
 	// container. Empty on platforms that do not use containers.
 	ContainerMounts(ctx context.Context, platform, subject string) ([]string, error)
+	// ApproverStatus reports whether the Contro1 channel is actually loaded in
+	// the platform and whether it may resolve this subject's approvals.
+	ApproverStatus(ctx context.Context, platform, subject string) (ApproverStatus, error)
 	Development() bool
+}
+
+/*
+ApproverStatus is the difference between "Contro1 is connected" and "approvals
+actually arrive".
+
+Connecting an agent gives Contro1 a credential and an endpoint. It does not put
+Contro1 in the path of anything. On NanoClaw that takes two more things a person
+does by hand: the channel has to be loaded into the host, and the approver has
+to hold a role in the group. Skip either and the installation looks finished
+from every angle we had: the connection is live, the doctor is green, the agent
+reports that it is connected, and not one approval is ever seen.
+*/
+type ApproverStatus struct {
+	// ChannelPresent is true when the platform itself reports the Contro1
+	// channel. Asked of the platform, because a file on disk is not the same as
+	// a channel the host loaded.
+	ChannelPresent bool
+	// ApproverExists is the Contro1 approver account in the platform.
+	ApproverExists bool
+	// ApproverMayResolve is that account holding the role it needs in THIS
+	// subject. Per subject, because the grant is per group.
+	ApproverMayResolve bool
 }
 
 // McpServerConfig is one configured MCP server, flattened to what matters here.
@@ -145,6 +171,7 @@ func Run(ctx context.Context, env Env, platform string) Report {
 
 	if mapping != nil {
 		for _, e := range mapping.Entries {
+			addApproverChecks(ctx, &r, env, platform, e)
 			addApplicationChecks(ctx, &r, env, platform, e)
 		}
 	}
@@ -326,4 +353,48 @@ func addApplicationChecks(ctx context.Context, r *Report, env Env, platform stri
 		return
 	}
 	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Set up, pointed at this agent's own connection."})
+}
+
+/*
+Is Contro1 actually in the path, or only connected to?
+
+Checked per subject and after the connection checks, because it is the question
+a person thinks they already answered by running connect. A connection that
+carries no approvals is the most expensive kind of green: everything reports
+success and nothing is governed.
+*/
+func addApproverChecks(ctx context.Context, r *Report, env Env, platform string, e runtimeproto.MappingEntry) {
+	id := "approvals_reach_contro1:" + e.PlatformSubject
+	label := "Approvals reach Contro1 for " + e.PlatformSubject
+
+	status, err := env.ApproverStatus(ctx, platform, e.PlatformSubject)
+	if err != nil {
+		// A platform that cannot answer produces no finding. Guessing here
+		// would send somebody to reinstall something that is already fine.
+		return
+	}
+	switch {
+	case !status.ChannelPresent:
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckBlocked, Actor: "you",
+			Message: "The Contro1 channel is not loaded in " + platform + ". The connection is live, but no approval will ever reach Contro1.",
+			// Named rather than automated: this copies code into the platform's
+			// own source tree, which is the person's to change.
+			NextCommand: "see skills/add-contro1 in the connector, or https://contro1.com/docs/" + platform + "-human-approval",
+		})
+	case !status.ApproverExists:
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message:     "The Contro1 approver account does not exist in " + platform + ", so cards cannot be routed to it.",
+			NextCommand: fmt.Sprintf("contro1 connect %s --confirm-roles", platform),
+		})
+	case !status.ApproverMayResolve:
+		add(r, runtimeproto.Check{
+			ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message:     "Contro1 is not an approver of " + e.PlatformSubject + ", so this group's cards go somewhere else.",
+			NextCommand: fmt.Sprintf("contro1 connect %s --confirm-roles --agent %s", platform, e.PlatformSubject),
+		})
+	default:
+		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Approvals for this agent come to Contro1."})
+	}
 }

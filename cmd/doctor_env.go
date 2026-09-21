@@ -226,3 +226,95 @@ func nclBinary() string {
 	}
 	return "ncl"
 }
+
+/*
+Whether Contro1 is actually in the approval path, asked of the platform.
+
+Three separate facts, because each can be true without the others and each
+produces a different, silent failure: the channel can be absent, present but
+without an approver account, or have one that holds no role in this group.
+*/
+func (e *systemDoctorEnv) ApproverStatus(ctx context.Context, platform, subject string) (doctor.ApproverStatus, error) {
+	var out doctor.ApproverStatus
+	if platform != "nanoclaw" {
+		return out, errors.New("not reported by this platform")
+	}
+
+	// The platform's own view of its channels. A file on disk is not the same
+	// as a channel the host loaded, and only the second one governs anything.
+	groups, err := nclList(ctx, "messaging-groups")
+	if err != nil {
+		return out, err
+	}
+	for _, g := range groups {
+		if strings.EqualFold(stringField(g, "channel_type"), contro1ChannelType) {
+			out.ChannelPresent = true
+			break
+		}
+	}
+
+	users, err := nclList(ctx, "users")
+	if err != nil {
+		return out, err
+	}
+	for _, u := range users {
+		if stringField(u, "id") == contro1ApproverUser {
+			out.ApproverExists = true
+			break
+		}
+	}
+	if !out.ApproverExists {
+		return out, nil
+	}
+
+	roles, err := nclList(ctx, "roles")
+	if err != nil {
+		return out, err
+	}
+	for _, r := range roles {
+		if stringField(r, "user_id") != contro1ApproverUser {
+			continue
+		}
+		// A global grant (no group) covers every group; otherwise it has to
+		// name this one. Checked per subject because the grant is per group.
+		group := stringField(r, "agent_group_id")
+		if group == "" || group == subject {
+			out.ApproverMayResolve = true
+			break
+		}
+	}
+	return out, nil
+}
+
+const (
+	contro1ChannelType  = "contro1"
+	contro1ApproverUser = "contro1:approvals"
+)
+
+// nclList reads one `ncl <resource> list --json` collection, accepting both the
+// {ok,data} envelope and the bare array older builds returned.
+func nclList(ctx context.Context, resource string) ([]map[string]any, error) {
+	out, err := platforms.ExecRunner(ctx, nclBinary(), resource, "list", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var rows []map[string]any
+	if json.Unmarshal(out, &rows) == nil {
+		return rows, nil
+	}
+	var frame struct {
+		OK   bool             `json:"ok"`
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(out, &frame); err != nil || !frame.OK {
+		return nil, errors.New("could not read " + resource + " from the platform")
+	}
+	return frame.Data, nil
+}
+
+func stringField(row map[string]any, key string) string {
+	if v, ok := row[key].(string); ok {
+		return v
+	}
+	return ""
+}

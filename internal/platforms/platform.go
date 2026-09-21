@@ -86,6 +86,13 @@ type Adapter interface {
 	// Connecting an agent is about approvals; letting it read a mailbox is not
 	// something anybody should acquire by running one more command they did not
 	// read closely.
+	// RemainingSetup lists what a person still has to do by hand before
+	// approvals actually reach Contro1. Empty when connecting is enough.
+	//
+	// It exists because "connected" and "governed" are different states and
+	// only one of them is visible from here. A platform that needs its own
+	// channel installed is connected long before it is governed.
+	RemainingSetup() []string
 	ApplicationChanges(conn LocalConnection) []Change
 	ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error
 	// SafeTest is the suggestion printed once connected.

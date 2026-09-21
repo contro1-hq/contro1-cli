@@ -127,13 +127,15 @@ func (s *memStates) Clear(p string) error           { delete(s.m, p); return nil
 
 type fakeAdapter struct {
 	platforms.Adapter
-	subjects []platforms.Subject
-	roles    bool
-	applied  int
-	reachErr bool
+	subjects  []platforms.Subject
+	roles     bool
+	applied   int
+	reachErr  bool
+	remaining []string
 }
 
-func (a *fakeAdapter) Name() string { return "openclaw" }
+func (a *fakeAdapter) Name() string             { return "openclaw" }
+func (a *fakeAdapter) RemainingSetup() []string { return a.remaining }
 func (a *fakeAdapter) Reach(context.Context, string) (runtimeproto.AgentReach, error) {
 	if a.reachErr {
 		return runtimeproto.AgentReach{}, errors.New("cannot read reach")
@@ -384,5 +386,35 @@ func TestYesDoesNotStandInForChoosingWhichAgentsToConnect(t *testing.T) {
 	opts.Agents = nil
 	if ns := o3.Run(context.Background(), opts); api3.prepares != 1 {
 		t.Fatalf("a single agent should proceed without --agent: %d prepares, %+v", api3.prepares, ns)
+	}
+}
+
+// The most expensive kind of green: everything reports success while nothing is
+// governed. A NanoClaw host is connected long before it routes an approval.
+func TestConnectSaysWhatItDidNotFinish(t *testing.T) {
+	o, _, _, _, adapter := setup(t)
+	adapter.remaining = []string{"Install the Contro1 channel into NanoClaw.", "Make Contro1 an approver."}
+	opts := base()
+	opts.Yes = true
+
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateConnected {
+		t.Fatalf("the connection itself did succeed: %+v", ns)
+	}
+	if !strings.Contains(ns.Message, "will not reach Contro1 yet") {
+		t.Fatalf("a connection that governs nothing must not read as finished: %q", ns.Message)
+	}
+	if len(ns.Checks) != 2 || ns.Checks[0].Status != runtimeproto.CheckWaiting {
+		t.Fatalf("each remaining step is listed as waiting on a person: %+v", ns.Checks)
+	}
+	if ns.NextCommand == "" {
+		t.Fatal("there must be somewhere to go next")
+	}
+
+	// A platform that needs nothing more says nothing more.
+	o2, _, _, _, _ := setup(t)
+	ns2 := o2.Run(context.Background(), opts)
+	if strings.Contains(ns2.Message, "will not reach") || len(ns2.Checks) != 0 {
+		t.Fatalf("a finished platform must not invent work: %q %+v", ns2.Message, ns2.Checks)
 	}
 }
