@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -186,31 +187,25 @@ func init() {
 				}
 			}
 
-			journal := &platforms.Journal{}
-			if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
-				return output.Errf(output.CodeNetwork, "%v", err)
-			}
-
-			/*
-			 * A container that has no internet of its own needs its gateway to
-			 * let it through, and that gateway has no way to pass a hostname
-			 * without a credential for it.
-			 *
-			 * So the agent is issued one, and it is registered with the
-			 * platform's own gateway rather than written into anything the
-			 * container can read. It lives on the host, is injected at the
-			 * proxy, and does not appear in the group's configuration.
-			 *
-			 * This is the one place the value is shown. It has to be: somebody
-			 * pastes it into that form once. It is not written to a file, not
-			 * put in the journal, and not repeated in any later output.
-			 */
+			// Provision the host gateway before restarting NanoClaw. OneCLI
+			// grants this secret to exactly the agent whose connection was approved;
+			// neither the secret nor a callback URL enters its container config.
 			if platform == "nanoclaw" {
+				if _, err := exec.LookPath("onecli"); err != nil {
+					return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host before its MCP server can be enabled")
+				}
 				lease, err := issueAgentLease(conn)
 				if err != nil {
 					return output.Errf(output.CodeNetwork, "%v", err)
 				}
-				printGatewayRegistration(conn, lease)
+				if err := installOnecliLease(ctx, conn, mcpURL(), lease, runOnecliCommand); err != nil {
+					return output.Errf(output.CodeNetwork, "could not grant the Contro1 credential to this NanoClaw agent in OneCLI: %v", err)
+				}
+			}
+
+			journal := &platforms.Journal{}
+			if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
+				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
 			prompt.Progress("Done. " + adapter.SafeTest())
@@ -222,6 +217,64 @@ func init() {
 	enable.Flags().DurationVar(&appsWait, "wait", 10*time.Minute, "how long to wait for the owner to allow applications")
 
 	appsCmd.AddCommand(enable)
+	claim := &cobra.Command{
+		Use:    "claim-nanoclaw <request-id> <agent-group-id>",
+		Short:  "Complete an owner-approved NanoClaw MCP connection on the host",
+		Hidden: true,
+		Args:   cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			endpoint := os.Getenv("CONTRO1_BROKER_ENDPOINT")
+			if endpoint == "" {
+				return output.Errf(output.CodeUnsafeBlocked, "this command requires the connected agent's host broker endpoint")
+			}
+			if _, err := exec.LookPath("onecli"); err != nil {
+				return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host")
+			}
+			ep, err := localipc.ParseEndpoint(endpoint)
+			if err != nil {
+				return output.Errf(output.CodeBadArgs, "invalid broker endpoint")
+			}
+			client := localipc.HTTPClient(ep, brokerServerPrincipal())
+			body, _ := json.Marshal(map[string]string{"request_id": args[0]})
+			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost,
+				localipc.BaseURL+"/api/centcom/v1/runtime/nanoclaw/mcp-lease", strings.NewReader(string(body)))
+			if err != nil {
+				return output.Errf(output.CodeNetwork, "could not prepare the host claim")
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := client.Do(req)
+			if err != nil {
+				return output.Errf(output.CodeNetwork, "the Contro1 host broker could not claim this approval")
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return output.Errf(output.CodeNetwork, "Contro1 refused the NanoClaw MCP claim (HTTP %d)", resp.StatusCode)
+			}
+			var claimed struct {
+				Lease   string `json:"lease"`
+				LeaseID string `json:"lease_id"`
+			}
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&claimed); err != nil || claimed.Lease == "" {
+				return output.Errf(output.CodeNetwork, "Contro1 returned an unreadable MCP claim")
+			}
+			if err := installOnecliLease(cmd.Context(), platforms.LocalConnection{PlatformSubject: args[1]}, mcpURL(), claimed.Lease, runOnecliCommand); err != nil {
+				if claimed.LeaseID != "" {
+					releaseBody, _ := json.Marshal(map[string]string{"request_id": args[0], "lease_id": claimed.LeaseID})
+					releaseReq, requestErr := http.NewRequestWithContext(cmd.Context(), http.MethodPost,
+						localipc.BaseURL+"/api/centcom/v1/runtime/nanoclaw/mcp-lease/release", strings.NewReader(string(releaseBody)))
+					if requestErr == nil {
+						releaseReq.Header.Set("Content-Type", "application/json")
+						if releaseResp, releaseErr := client.Do(releaseReq); releaseErr == nil {
+							releaseResp.Body.Close()
+						}
+					}
+				}
+				return output.Errf(output.CodeNetwork, "could not grant Contro1 MCP to this NanoClaw agent in OneCLI: %v", err)
+			}
+			return nil
+		},
+	}
+	appsCmd.AddCommand(claim)
 	rootCmd.AddCommand(appsCmd)
 }
 
@@ -298,11 +351,12 @@ func commandsOf(changes []platforms.Change) []string {
 func renderApplicationsResult(conn platforms.LocalConnection, status runtimeStatus, j *platforms.Journal) error {
 	if flagFormat == "json" {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
-			"agent_id":         conn.AgentID,
-			"platform":         conn.Platform,
-			"platform_subject": conn.PlatformSubject,
-			"endpoint_mode":    status.EndpointMode,
-			"applied":          j.RoleCommands,
+			"agent_id":                      conn.AgentID,
+			"platform":                      conn.Platform,
+			"platform_subject":              conn.PlatformSubject,
+			"endpoint_mode":                 status.EndpointMode,
+			"applied":                       j.RoleCommands,
+			"gateway_registration_required": false,
 		})
 	}
 	fmt.Printf("%s can now reach the applications its owner allowed, through Contro1.\n", displayOf(conn))
@@ -347,26 +401,76 @@ func issueAgentLease(conn platforms.LocalConnection) (string, error) {
 	return lease, nil
 }
 
-// printGatewayRegistration says exactly what to put where, in the words the
-// gateway's own form uses, so nobody has to translate anything.
-func printGatewayRegistration(conn platforms.LocalConnection, lease string) {
-	host := strings.TrimPrefix(strings.TrimPrefix(mcpURL(), "https://"), "http://")
-	if i := strings.Index(host, "/"); i > 0 {
-		host = host[:i]
+type onecliRunner func(context.Context, ...string) ([]byte, error)
+
+// runOnecliCommand never puts the lease in argv or a shell. OneCLI reads it
+// from a short-lived, owner-only file; callers must not include command output
+// in errors because gateway clients can echo request details on failure.
+func runOnecliCommand(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "onecli", args...).Output()
+}
+
+// installOnecliLease keeps the runtime credential in the host vault and grants
+// it only to NanoClaw's OneCLI identity (the NanoClaw agent group id). A
+// hostname-wide secret without this explicit grant would let another group
+// impersonate this agent at Contro1.
+func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcpAddress, lease string, run onecliRunner) error {
+	u, err := url.Parse(mcpAddress)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Path != "/api/centcom/mcp" {
+		return errors.New("invalid Contro1 MCP address for gateway registration")
 	}
-	fmt.Println()
-	fmt.Printf("One step left, once, for %s.\n", displayOf(conn))
-	fmt.Println("Its container reaches the internet only through NanoClaw's credential gateway,")
-	fmt.Println("which needs a credential for each hostname. Add this one there:")
-	fmt.Println()
-	fmt.Println("  Host pattern:   " + host)
-	fmt.Println("  Path pattern:   /*")
-	fmt.Println("  Inject as:      Header")
-	fmt.Println("  Header name:    Authorization")
-	fmt.Println("  Header value:   Bearer {value}")
-	fmt.Println("  Secret value:   " + lease)
-	fmt.Println()
-	fmt.Println("It is stored on this computer, not in the container, so the agent never")
-	fmt.Println("holds it. It expires, and you can revoke it in Contro1 at any time.")
-	fmt.Println("This is the only time it is shown.")
+	agentsRaw, err := run(ctx, "agents", "list", "--max", "0")
+	if err != nil {
+		return errors.New("could not list OneCLI agents")
+	}
+	var agents []struct {
+		ID         string `json:"id"`
+		Identifier string `json:"identifier"`
+	}
+	if err := json.Unmarshal(agentsRaw, &agents); err != nil {
+		return errors.New("OneCLI returned an unreadable agent list")
+	}
+	var onecliAgentID string
+	for _, agent := range agents {
+		if agent.Identifier == conn.PlatformSubject {
+			onecliAgentID = agent.ID
+			break
+		}
+	}
+	if onecliAgentID == "" {
+		return errors.New("this NanoClaw agent has no OneCLI identity yet; start it once with the OneCLI gateway enabled")
+	}
+	f, err := os.CreateTemp("", "contro1-onecli-secret-*")
+	if err != nil {
+		return errors.New("could not create a temporary credential file")
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return errors.New("could not restrict the temporary credential file")
+	}
+	if _, err := f.WriteString(lease); err != nil {
+		f.Close()
+		return errors.New("could not prepare the gateway credential")
+	}
+	if err := f.Close(); err != nil {
+		return errors.New("could not close the gateway credential file")
+	}
+	createdRaw, err := run(ctx, "secrets", "create", "--name", "Contro1 "+conn.PlatformSubject,
+		"--type", "generic", "--file", f.Name(), "--host-pattern", u.Hostname(),
+		"--path-pattern", u.Path, "--header-name", "Authorization", "--value-format", "Bearer {value}")
+	if err != nil {
+		return errors.New("OneCLI refused the credential")
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(createdRaw, &created); err != nil || created.ID == "" {
+		return errors.New("OneCLI created a credential but did not return its id; inspect the OneCLI vault before retrying")
+	}
+	if _, err := run(ctx, "agents", "grants", "attach-secret", "--id", onecliAgentID, "--secret-id", created.ID); err != nil {
+		_, _ = run(ctx, "secrets", "delete", "--id", created.ID)
+		return errors.New("OneCLI would not grant the credential to this agent")
+	}
+	return nil
 }

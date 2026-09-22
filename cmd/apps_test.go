@@ -1,9 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/contro1-hq/contro1-cli/internal/platforms"
 )
 
 /*
@@ -89,5 +94,85 @@ func TestAnUnexpectedBodyIsShownButNotDumped(t *testing.T) {
 	}
 	if got := truncateForError("  short  "); got != "short" {
 		t.Fatalf("a short body is shown as it stands: %q", got)
+	}
+}
+
+func TestOnecliLeaseGrantedOnlyToMatchingNanoAgent(t *testing.T) {
+	lease := "ccr_live_test_secret_never_in_argv"
+	conn := platforms.LocalConnection{PlatformSubject: "nano-group-1"}
+	var calls [][]string
+	var tempPath string
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if strings.Contains(strings.Join(args, " "), lease) {
+			t.Fatal("lease appeared in OneCLI arguments")
+		}
+		switch args[0] + " " + args[1] {
+		case "agents list":
+			return []byte(`[{"id":"other-id","identifier":"other-group"},{"id":"onecli-agent-1","identifier":"nano-group-1"}]`), nil
+		case "secrets create":
+			for i := range args {
+				if args[i] == "--file" {
+					tempPath = args[i+1]
+					got, err := os.ReadFile(tempPath)
+					if err != nil || string(got) != lease {
+						t.Fatalf("OneCLI file did not contain the lease: %v", err)
+					}
+				}
+			}
+			return []byte(`{"id":"secret-1"}`), nil
+		case "agents grants":
+			return []byte(`{"status":"attached"}`), nil
+		}
+		return nil, errors.New("unexpected OneCLI command")
+	}
+	if err := installOnecliLease(context.Background(), conn, "https://api.contro1.com/api/centcom/mcp", lease, run); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 || strings.Join(calls[2], " ") != "agents grants attach-secret --id onecli-agent-1 --secret-id secret-1" {
+		t.Fatalf("secret was not granted to exactly the matching agent: %v", calls)
+	}
+	created := strings.Join(calls[1], " ")
+	if !strings.Contains(created, "--path-pattern /api/centcom/mcp") || !strings.Contains(created, "--host-pattern api.contro1.com") {
+		t.Fatalf("secret was not confined to the MCP endpoint: %s", created)
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatal("temporary lease file was not removed")
+	}
+}
+
+func TestOnecliLeaseNeverCreatedForUnmatchedAgent(t *testing.T) {
+	called := 0
+	run := func(_ context.Context, _ ...string) ([]byte, error) {
+		called++
+		return []byte(`[{"id":"other-id","identifier":"other-group"}]`), nil
+	}
+	err := installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
+		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run)
+	if err == nil || called != 1 {
+		t.Fatalf("must refuse to create a credential without the exact Nano agent: %v, calls=%d", err, called)
+	}
+}
+
+func TestOnecliLeaseGrantFailureDeletesVaultSecret(t *testing.T) {
+	var commands []string
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch args[0] + " " + args[1] {
+		case "agents list":
+			return []byte(`[{"id":"onecli-agent-1","identifier":"nano-group-1"}]`), nil
+		case "secrets create":
+			return []byte(`{"id":"secret-1"}`), nil
+		case "agents grants":
+			return nil, errors.New("grant failed")
+		case "secrets delete":
+			return []byte(`{"status":"deleted"}`), nil
+		}
+		return nil, errors.New("unexpected command")
+	}
+	err := installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
+		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run)
+	if err == nil || len(commands) != 4 || commands[3] != "secrets delete --id secret-1" {
+		t.Fatalf("orphaned vault secret after failed grant: %v, commands=%v", err, commands)
 	}
 }

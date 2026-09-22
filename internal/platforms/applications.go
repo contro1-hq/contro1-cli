@@ -80,15 +80,12 @@ its identity, and whoever received it would then be that agent from anywhere.
 The whole point of holding keys off the agent is lost the moment one is written
 where it can read it back.
 
-A remote MCP server does not take a credential in its configuration. It takes a
-URL, answers 401 with `WWW-Authenticate`, and the client completes OAuth itself
-and keeps its own token. That is how every other MCP server is added here, and
-it is what the entry that was already in this group was doing before any of
-this: it returned 401 to everything, and the 401 was not the fault. It was the
-invitation, and nobody had accepted it.
-
-An agent in a container has no browser, which is exactly what the device flow
-is for: the client shows a code, a person approves it wherever they are.
+The Contro1 MCP server is configured here with a URL and no credential. NanoClaw
+passes that URL to the Claude Agent SDK, but this path does not complete the
+server's OAuth challenge or persist an MCP token. A 401 therefore means the
+host gateway has not yet been provisioned; it is not evidence that NanoClaw
+will finish authorization automatically. A credential must be held outside the
+agent container and granted only to this NanoClaw agent in OneCLI.
 */
 func (n *nanoClaw) ApplicationChanges(conn LocalConnection) []Change {
 	return []Change{

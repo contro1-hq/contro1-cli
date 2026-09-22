@@ -180,6 +180,10 @@ type DataRoute struct {
 
 var approvalsOnlyRoutes = []DataRoute{
 	{"GET", "/api/centcom/v1/runtime/status"},
+	// Host-only DPoP claim after the accountable owner approved a NanoClaw MCP
+	// card. The API rejects bearer leases and enforces one-time consumption.
+	{"POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease"},
+	{"POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease/release"},
 	{"POST", "/api/centcom/v1/requests"},
 	{"POST", "/api/centcom/v1/requests/control-map"},
 	{"GET", "/api/centcom/v1/requests"},

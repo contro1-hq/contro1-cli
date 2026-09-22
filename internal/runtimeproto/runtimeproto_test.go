@@ -24,6 +24,9 @@ func TestAllowedRoute(t *testing.T) {
 		{ModeApprovalsOnly, "PUT", "/api/centcom/v1/requests", false},
 		{ModeApprovalsOnly, "POST", "/api/centcom/v1/runtime/oauth/token", false},
 		{ModeApprovalsOnly, "POST", "/mcp", true},
+		{ModeApprovalsOnly, "POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease", true},
+		{ModeApprovalsOnly, "POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease/release", true},
+		{ModeApprovalsOnly, "GET", "/api/centcom/v1/runtime/nanoclaw/mcp-lease", false},
 	}
 	for _, c := range cases {
 		if got := AllowedRoute(c.mode, c.method, c.path); got != c.want {
