@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -142,7 +141,7 @@ func init() {
 					"that connection is a %s agent, not %s; name the one you mean with --agent", conn.Platform, platform)
 			}
 
-			adapter, err := platforms.New(platform, platforms.Options{})
+			adapter, err := platforms.New(platform, platforms.Options{McpURL: mcpURL()})
 			if err != nil {
 				return output.Errf(output.CodeBadArgs, "%v", err)
 			}
@@ -187,28 +186,7 @@ func init() {
 			}
 
 			journal := &platforms.Journal{}
-			/*
-			 * A runtime that cannot hold this connection's key gets a bounded
-			 * bearer for it instead, issued by the accountable owner.
-			 *
-			 * A NanoClaw agent is that case: it runs in a container that
-			 * reaches Contro1 over HTTPS and cannot be handed the host socket,
-			 * because NanoClaw's mounts are rewritten under a fixed prefix and
-			 * can never be read-write, and a socket mounted read-only cannot be
-			 * connected to.
-			 *
-			 * The lease is never printed, never written to a file here, and is
-			 * handed straight to the platform as one argument.
-			 */
-			if withCredential, needs := adapter.(platforms.NeedsCredential); needs {
-				lease, err := issueAgentLease(ctx, conn)
-				if err != nil {
-					return output.Errf(output.CodeNetwork, "%v", err)
-				}
-				if err := withCredential.ApplyApplicationsWithCredential(ctx, conn, mcpURL(), lease, journal); err != nil {
-					return output.Errf(output.CodeNetwork, "%v", err)
-				}
-			} else if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
+			if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
@@ -320,33 +298,4 @@ func mcpURL() string {
 		api = "https://api.contro1.com"
 	}
 	return strings.TrimRight(api, "/") + "/api/centcom/mcp"
-}
-
-/*
-issueAgentLease asks Contro1 for a bounded credential for this agent.
-
-Only its accountable owner may ask, which the server enforces: the person who
-set up a computer is not the person answerable for what the agent then reads.
-
-The value is returned once and is not printed, stored or logged here. It goes
-directly into the platform's own configuration, which is where a credential for
-that platform belongs.
-*/
-func issueAgentLease(ctx context.Context, conn platforms.LocalConnection) (string, error) {
-	c, _, err := newClient()
-	if err != nil {
-		return "", err
-	}
-	resp, err := c.Do("POST",
-		"/api/centcom/v1/runtime/connections/enrollments/"+url.PathEscape(conn.EnrollmentID)+"/lease",
-		map[string]any{})
-	if err != nil {
-		return "", fmt.Errorf("Contro1 would not issue a credential for this agent: %w", err)
-	}
-	lease, _ := resp["lease"].(string)
-	if lease == "" {
-		return "", errors.New("Contro1 did not return a credential")
-	}
-	_ = ctx
-	return lease, nil
 }

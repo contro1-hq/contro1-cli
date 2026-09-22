@@ -99,12 +99,6 @@ type Adapter interface {
 	SafeTest() string
 }
 
-// NeedsCredential is implemented by a platform whose runtime cannot hold this
-// connection's key and is given a bounded bearer for it instead.
-type NeedsCredential interface {
-	ApplyApplicationsWithCredential(ctx context.Context, conn LocalConnection, mcpURL, lease string, j *Journal) error
-}
-
 // Runner executes platform CLIs; tests substitute a fake.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
@@ -127,6 +121,9 @@ type Options struct {
 	Principal string
 	// Agents lists subjects explicitly, skipping discovery.
 	Agents []string
+	// McpURL is where a platform that cannot use a local endpoint reaches
+	// Contro1. A URL only: a remote MCP server authenticates its own client.
+	McpURL string
 }
 
 func New(platform string, opts Options) (Adapter, error) {

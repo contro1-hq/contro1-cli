@@ -63,36 +63,39 @@ func mcpArgsJSON(subject string) string {
 // ---------------------------------------------------------------------------
 
 /*
-NANOCLAW REACHES CONTRO1 OVER HTTPS, NOT OVER THE LOCAL SOCKET.
+NANOCLAW GETS A URL AND NOTHING ELSE, WHICH IS HOW A REMOTE MCP SERVER WORKS.
 
-This was built the other way round first, mounting the agent's socket and the
-contro1 binary into its container, and it cannot work. NanoClaw's mount rules
-rewrite every container path under a fixed prefix, reject absolute ones, and
-have no way to ask for read-write: `ncl groups config add-mount` can set
-readonly true and never false. A unix socket mounted read-only cannot be
-connected to, so the socket could never have crossed that boundary.
+This was built twice the wrong way before landing on the way it already worked.
 
-What the container can do is reach the public API, which is how the older
-setup was configured before this: `type: http` pointing at the MCP endpoint.
-That shape was right. What it lacked was a credential, which is why every call
-came back 401 while the agent reported itself connected.
+First by mounting the agent's socket into its container. That cannot work:
+NanoClaw rewrites every container path under a fixed prefix, rejects absolute
+ones, and `ncl groups config add-mount` can set readonly true and never false,
+so a unix socket can never be connected to through it.
 
-So the container is given a bounded bearer lease for this agent's own
-connection, in a header. It is issued by the accountable owner, it expires, it
-can be revoked, and the audit record says a key-bound connection lent it. No
-mounts, no allowlist, no socket leaving the host.
+Then by putting a bearer lease in the server's headers. That works and it is
+wrong, which is worse. Anything stored in the group's config is readable by the
+agent in that group: `ncl groups config get` returns it in full. An agent that
+several people can instruct could be asked to read out the credential that IS
+its identity, and whoever received it would then be that agent from anywhere.
+The whole point of holding keys off the agent is lost the moment one is written
+where it can read it back.
+
+A remote MCP server does not take a credential in its configuration. It takes a
+URL, answers 401 with `WWW-Authenticate`, and the client completes OAuth itself
+and keeps its own token. That is how every other MCP server is added here, and
+it is what the entry that was already in this group was doing before any of
+this: it returned 401 to everything, and the 401 was not the fault. It was the
+invitation, and nobody had accepted it.
+
+An agent in a container has no browser, which is exactly what the device flow
+is for: the client shows a code, a person approves it wherever they are.
 */
 func (n *nanoClaw) ApplicationChanges(conn LocalConnection) []Change {
 	return []Change{
 		{
-			Kind:        "credential",
-			Description: "Issue this agent a bounded credential for its container, which cannot hold its connection's key",
-			After:       "contro1 issues a lease for " + conn.AgentID + " (expires, and can be revoked at any time)",
-		},
-		{
 			Kind:        "mcp",
-			Description: "Point the agent's Contro1 MCP server at Contro1, as itself. Replaces any earlier entry, including one with no credential",
-			After:       fmt.Sprintf("%s groups config add-mcp-server --id %s --name contro1 --url <api>/api/centcom/mcp --headers <credential>", n.bin(), conn.PlatformSubject),
+			Description: "Point the agent's Contro1 MCP server at Contro1. A URL and nothing else: no credential is written where the agent could read it back",
+			After:       fmt.Sprintf("%s groups config add-mcp-server --id %s --name contro1 --url <api>/api/centcom/mcp", n.bin(), conn.PlatformSubject),
 		},
 		{
 			Kind:        "restart",
@@ -102,26 +105,16 @@ func (n *nanoClaw) ApplicationChanges(conn LocalConnection) []Change {
 	}
 }
 
-// ApplyApplications needs the lease, so the caller issues it and passes it in.
-// It is never logged, never written to a file by this process, and reaches ncl
-// as one argument that ncl stores in the group's own config.
 func (n *nanoClaw) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
-	return errors.New("nanoclaw needs a credential for its container: use ApplyApplicationsWithCredential")
-}
-
-func (n *nanoClaw) ApplyApplicationsWithCredential(ctx context.Context, conn LocalConnection, mcpURL, lease string, j *Journal) error {
-	if lease == "" {
-		return errors.New("no credential was issued for this agent")
+	url := n.opts.McpURL
+	if url == "" {
+		return errors.New("no Contro1 MCP address was resolved for this platform")
 	}
-	headers, err := json.Marshal(map[string]string{"Authorization": "Bearer " + lease})
-	if err != nil {
-		return err
-	}
-
 	steps := [][]string{
 		// Removed first, so an earlier entry cannot survive beside the new one.
+		// That includes one carrying a credential, which must not be left behind.
 		{"groups", "config", "remove-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1"},
-		{"groups", "config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--url", mcpURL, "--headers", string(headers)},
+		{"groups", "config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--url", url},
 		{"groups", "restart", "--id", conn.PlatformSubject},
 	}
 	for _, args := range steps {
@@ -130,11 +123,9 @@ func (n *nanoClaw) ApplyApplicationsWithCredential(ctx context.Context, conn Loc
 			if len(args) > 2 && args[2] == "remove-mcp-server" {
 				continue
 			}
-			// The lease is in one of these arguments, so the command is not
-			// echoed back in the error.
-			return fmt.Errorf("%s %s failed for %s: %w", n.bin(), strings.Join(args[:3], " "), conn.PlatformSubject, err)
+			return fmt.Errorf("%s %s: %w", n.bin(), strings.Join(args, " "), err)
 		}
-		j.RoleCommands = append(j.RoleCommands, n.bin()+" "+strings.Join(args[:3], " ")+" --id "+conn.PlatformSubject)
+		j.RoleCommands = append(j.RoleCommands, n.bin()+" "+strings.Join(args, " "))
 	}
 	return nil
 }
