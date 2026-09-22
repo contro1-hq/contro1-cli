@@ -420,8 +420,15 @@ func TestNanoClawApplicationsMountsOnlyThisAgentsSocket(t *testing.T) {
 	for _, args := range ran {
 		joined += strings.Join(args, " ") + "\n"
 	}
+	// `config` is a verb of the groups resource. `ncl config add-mount` exits 1
+	// with nothing useful, which is exactly how this shipped once.
+	for _, verb := range []string{"add-mount", "add-mcp-server", "remove-mcp-server"} {
+		if !strings.Contains(joined, "groups config "+verb) {
+			t.Fatalf("%s must be run as `ncl groups config %s`:\n%s", verb, verb, joined)
+		}
+	}
 	// Only this agent's socket. A wider mount would let the group act as another.
-	if !strings.Contains(joined, "add-mount --id ag-sales --host "+socket) {
+	if !strings.Contains(joined, "groups config add-mount --id ag-sales --host "+socket) {
 		t.Fatalf("the agent's own socket is not mounted:\n%s", joined)
 	}
 	if !strings.Contains(joined, "--container /usr/local/bin/contro1 --ro") {

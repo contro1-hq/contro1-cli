@@ -69,18 +69,18 @@ func (n *nanoClaw) ApplicationChanges(conn LocalConnection) []Change {
 			Kind:        "mount",
 			Path:        socket,
 			Description: "Mount this agent's own Contro1 socket into its container, and only this one, so the group can act as itself and as nothing else",
-			After:       fmt.Sprintf("%s config add-mount --id %s --host %s --container %s", n.bin(), conn.PlatformSubject, socket, socket),
+			After:       fmt.Sprintf("%s groups config add-mount --id %s --host %s --container %s", n.bin(), conn.PlatformSubject, socket, socket),
 		},
 		{
 			Kind:        "mount",
 			Path:        binary,
 			Description: "Mount the contro1 binary into the container, read only. It carries no credential; the local Contro1 service holds the key",
-			After:       fmt.Sprintf("%s config add-mount --id %s --host %s --container /usr/local/bin/contro1 --ro", n.bin(), conn.PlatformSubject, binary),
+			After:       fmt.Sprintf("%s groups config add-mount --id %s --host %s --container /usr/local/bin/contro1 --ro", n.bin(), conn.PlatformSubject, binary),
 		},
 		{
 			Kind:        "mcp",
 			Description: "Point the agent's Contro1 MCP server at its own connection. Replaces any earlier entry, including one holding an API key",
-			After:       fmt.Sprintf("%s config add-mcp-server --id %s --name contro1 --command contro1 --args %s", n.bin(), conn.PlatformSubject, mcpArgsJSON(conn.PlatformSubject)),
+			After:       fmt.Sprintf("%s groups config add-mcp-server --id %s --name contro1 --command contro1 --args %s", n.bin(), conn.PlatformSubject, mcpArgsJSON(conn.PlatformSubject)),
 		},
 		{
 			Kind:        "restart",
@@ -100,18 +100,22 @@ func (n *nanoClaw) ApplyApplications(ctx context.Context, conn LocalConnection, 
 		return fmt.Errorf("this agent's endpoint %s is not there; is the Contro1 service running? (contro1 doctor nanoclaw)", socket)
 	}
 
+	// `config` is a VERB OF THE GROUPS RESOURCE, not a resource of its own:
+	// `ncl groups config add-mount`, never `ncl config add-mount`. The shorter
+	// form exits 1 with nothing useful, and it was in our own documentation
+	// too, so anybody following it by hand hit the same wall.
 	steps := [][]string{
-		{"config", "add-mount", "--id", conn.PlatformSubject, "--host", socket, "--container", socket},
-		{"config", "add-mount", "--id", conn.PlatformSubject, "--host", binary, "--container", "/usr/local/bin/contro1", "--ro"},
+		{"groups", "config", "add-mount", "--id", conn.PlatformSubject, "--host", socket, "--container", socket},
+		{"groups", "config", "add-mount", "--id", conn.PlatformSubject, "--host", binary, "--container", "/usr/local/bin/contro1", "--ro"},
 		// Removed first, so an earlier entry cannot survive beside the new one.
-		{"config", "remove-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1"},
-		{"config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--command", "contro1", "--args", mcpArgsJSON(conn.PlatformSubject)},
+		{"groups", "config", "remove-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1"},
+		{"groups", "config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--command", "contro1", "--args", mcpArgsJSON(conn.PlatformSubject)},
 		{"groups", "restart", "--id", conn.PlatformSubject},
 	}
 	for _, args := range steps {
 		if _, err := n.opts.Runner(ctx, n.bin(), args...); err != nil {
 			// Removing an entry that was never there is the ordinary first run.
-			if args[1] == "remove-mcp-server" {
+			if len(args) > 2 && args[2] == "remove-mcp-server" {
 				continue
 			}
 			return fmt.Errorf("%s %s: %w", n.bin(), strings.Join(args, " "), err)
