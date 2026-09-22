@@ -42,6 +42,10 @@ install with the script above or download the latest release archive directly.
 ## Quick start
 
 ```bash
+contro1 bootstrap --mcp-only             # Remote HTTP config (default)
+contro1 mcp login                        # only for stdio-only clients
+contro1 mcp serve                        # configure this as the stdio command
+
 contro1 auth login --mode agent    # safe developer profile; browser + PKCE
 contro1 init --name "Claude Code - Laptop"
 contro1 requests create \
@@ -78,10 +82,22 @@ SDK/API integration.
 
 ## Authentication
 
-`contro1 auth login` runs a loopback + PKCE browser flow:
+MCP and CLI runtime authentication are deliberately separate. `contro1 mcp
+login` dynamically registers the local adapter and uses OAuth 2.1 Authorization
+Code + PKCE with an exact loopback redirect. Its rotating access/refresh token
+bundle is stored under a separate keychain profile. `contro1 mcp logout`
+revokes the token family. Every MCP connection, from any client, can also be
+seen and disconnected in the dashboard under Settings > Connected apps. The adapter forwards JSON-RPC and adds no local
+execution tools or cached policy decisions.
 
-1. The CLI starts a local server and opens `WEB_URL/cli/authorize` with a PKCE challenge.
-2. You approve in the dashboard. The dashboard returns a one-time code to the CLI.
+Clients that support Remote MCP do not need the adapter: use the URL emitted by
+`contro1 bootstrap --mcp-only`. Use `--mcp-transport stdio` to emit a config
+whose command is `contro1 mcp serve`.
+
+`contro1 auth login` runs a remote-approval + PKCE browser flow:
+
+1. The CLI opens `WEB_URL/cli/authorize` with a PKCE challenge and an opaque, five-minute relay id.
+2. You approve in the dashboard from this computer or another device. The CLI polls the Contro1 relay over outbound HTTPS; no callback needs to reach your computer.
 3. The CLI exchanges the code for a scoped token (`cco_cli_live_...`), stored in your
    OS keychain (with a `0600` file fallback).
 
@@ -99,10 +115,27 @@ after 8 hours, require an interactive TTY for decisions, and cannot use that env
 
 ```
 Core:              auth  config  whoami  doctor  scopes
-Agent workflows:   init  ask  agents  requests  run  hooks  evidence  traces
+Agent workflows:   bootstrap  mcp  init  agents  actions  activity  runtime  bridge  skills  ask  requests  run  hooks  evidence  traces
 Read-only admin:   org  api-keys  webhooks  integrations
 Operator queue:    queue
 ```
+
+### Agent Runtime credentials
+
+`contro1 auth login` and `contro1 mcp login` authenticate the developer control
+plane. They are not credentials for unattended agent code. Register the agent,
+then open the credential setup link returned by MCP (or Settings > Agent
+credentials) and store the one-time secret in the runtime as
+`CONTRO1_API_KEY`.
+
+That one Agent Credential authenticates Gateway Actions, local approval
+requests and client-reported activity. Application access is still empty until
+an authorized person grants specific Actions.
+
+Approval decisions can be read with the same credential. A signed webhook is
+optional and should be configured only when the runtime has a durable public
+HTTPS receiver. Its `CONTRO1_WEBHOOK_SECRET` verifies Contro1-to-runtime calls
+and is separate from the Agent Credential.
 
 Run `contro1 help` for the grouped list, or `contro1 <topic> --help` for details.
 
@@ -296,7 +329,11 @@ default under CI) and `--quiet`.
 0 ok        1 general      2 bad args   3 auth error
 4 insufficient scope       5 request denied
 6 timeout                  7 network error
+8 not found (HTTP 404)     9 conflict (HTTP 409/412, e.g. idempotency key reused with a different body)
+10 unsafe operation blocked locally, before any request was sent
 ```
+
+Codes 8-10 were added for runtime bridges. Before that, a 404 or 409 exited 1.
 
 On a `contro1 run` timeout (exit 6) the command never executes. The CLI's `--timeout`
 is the executor's patience, not the request's lifecycle: the request is left open
@@ -307,6 +344,43 @@ for a command that actually ran.
 For approval gates with an SLA, keep `--timeout` greater than `--sla-minutes` so
 the command runner does not give up before the approval window and escalation path
 have had time to finish.
+
+## Runtime bridges and Actions
+
+Host bridges for OpenClaw, NanoClaw and similar local agent runtimes run the CLI
+on the host with an Agent Credential, keep that credential out of the agent or
+container, and expose only a small set of bridge tools to the agent.
+
+```bash
+export CONTRO1_AGENT_TOKEN_FILE=/run/secrets/contro1-agent-token
+
+contro1 runtime status --format json --quiet
+contro1 bridge manifest --target openclaw --format json --quiet
+contro1 bridge doctor --target openclaw --format json --quiet
+
+contro1 actions invoke --file invocation.json --idempotency-key openclaw:exec:apr_123 --format json --quiet
+contro1 actions get <invocation_id> --format json --quiet
+contro1 actions cancel <invocation_id> --format json --quiet
+contro1 activity report --file activity.json --format json --quiet
+```
+
+Token rules:
+
+- `actions invoke`, `actions cancel`, `activity report` and `bridge doctor` are
+  runtime-only. They read `CONTRO1_AGENT_TOKEN_FILE`, `CONTRO1_AGENT_TOKEN` or
+  `CONTRO1_TOKEN` (in that order), never the keychain, and refuse a `cco_cli_`
+  token with exit 10 before sending anything.
+- `requests create|get|list|wait|cancel|control-map --runtime` and
+  `actions get|watch --runtime` use the same runtime identity. A bridge passes
+  `--runtime` on every call, so it can never drift into a developer's login.
+- Every other command ignores `CONTRO1_AGENT_TOKEN_FILE` and `CONTRO1_AGENT_TOKEN`
+  and uses `CONTRO1_TOKEN` or the keychain, as before. `CONTRO1_TOKEN` keeps
+  accepting any token for CI.
+- An operator profile refuses to run while any of the three env variables is set.
+
+`contro1 bridge manifest` is discovery metadata, not a security boundary. The
+server enforces scopes, Action Grants and agent binding regardless of what a
+bridge exposes.
 
 ## Operator queue
 

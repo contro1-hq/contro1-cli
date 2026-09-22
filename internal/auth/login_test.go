@@ -37,3 +37,10 @@ func TestBuildAuthorizeURL(t *testing.T) {
 		t.Errorf("manual URL malformed: %s", manual)
 	}
 }
+
+func TestRelayAuthorizeURLKeepsPKCEAndHasNoLoopbackTarget(t *testing.T) {
+	u := buildAuthorizeURL("https://contro1.com", "CH", "ST", "remote box", "agent", "", true)
+	if !strings.Contains(u, "challenge=CH") || !strings.Contains(u, "mode=manual") || strings.Contains(u, "redirect=") {
+		t.Errorf("relay source URL malformed: %s", u)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net"
@@ -70,13 +71,90 @@ func Login(pr *config.Profile, deviceName, cliVersion, accessProfile string, noB
 	if noBrowser {
 		code, err = manualFlow(pr, challenge, state, deviceName, accessProfile)
 	} else {
-		code, err = loopbackFlow(pr, challenge, state, deviceName, accessProfile)
+		code, err = relayFlow(pr, challenge, state, deviceName, accessProfile)
 	}
 	if err != nil {
 		return nil, err
 	}
 
 	return exchange(pr, code, verifier, deviceName, cliVersion)
+}
+
+// relayFlow lets the approval happen on any device. The CLI polls Contro1 over
+// its already-outbound HTTPS connection, so no browser needs to reach a local
+// port on this computer. The approval code is still useless without this
+// process's PKCE verifier.
+func relayFlow(pr *config.Profile, challenge, state, deviceName, accessProfile string) (string, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"code_challenge": challenge,
+		"name":           deviceName,
+		"access_profile": accessProfile,
+	})
+	base := strings.TrimRight(pr.APIURL, "/") + "/api/centcom/auth/cli/relay"
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Post(base, "application/json", strings.NewReader(string(payload)))
+	if err != nil {
+		return "", fmt.Errorf("starting remote sign-in: %w", err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			RelayID string `json:"relay_id"`
+		} `json:"data"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return "", fmt.Errorf("reading remote sign-in response: %w", err)
+	}
+	if resp.StatusCode != http.StatusCreated || !created.OK || created.Data.RelayID == "" {
+		if created.Error.Message == "" {
+			created.Error.Message = "could not start remote sign-in"
+		}
+		return "", errors.New(created.Error.Message)
+	}
+
+	u, err := url.Parse(buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, accessProfile, "", true))
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("mode", "relay")
+	q.Set("relay_id", created.Data.RelayID)
+	u.RawQuery = q.Encode()
+	authURL := u.String()
+	fmt.Fprintln(os.Stderr, "Open this URL on any device to authorize the contro1 CLI:")
+	fmt.Fprintln(os.Stderr, "  "+authURL)
+	_ = browser.OpenURL(authURL)
+
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		check, err := http.Get(base + "/" + url.PathEscape(created.Data.RelayID))
+		if err != nil {
+			continue
+		}
+		var status struct {
+			OK   bool `json:"ok"`
+			Data struct {
+				State string `json:"state"`
+				Code  string `json:"code"`
+			} `json:"data"`
+		}
+		err = json.NewDecoder(check.Body).Decode(&status)
+		check.Body.Close()
+		if err != nil || !status.OK {
+			continue
+		}
+		if status.Data.State == "approved" && status.Data.Code != "" {
+			return status.Data.Code, nil
+		}
+		if status.Data.State == "denied" {
+			return "", errors.New("authorization denied")
+		}
+	}
+	return "", errors.New("timed out waiting for remote authorization")
 }
 
 func loopbackFlow(pr *config.Profile, challenge, state, deviceName, accessProfile string) (string, error) {
