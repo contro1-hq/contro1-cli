@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -13,6 +14,8 @@ import (
 
 var (
 	loginNoBrowser bool
+	loginRemote    bool
+	loginComplete  bool
 	loginName      string
 	loginPlaintext bool
 	loginMode      string
@@ -36,6 +39,8 @@ func init() {
 		RunE: runLogin,
 	}
 	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false, "print a URL to approve on another device instead of opening a browser")
+	loginCmd.Flags().BoolVar(&loginRemote, "remote", false, "start a detached remote sign-in that can be completed in a later CLI run")
+	loginCmd.Flags().BoolVar(&loginComplete, "complete", false, "complete a detached remote sign-in after it was approved")
 	loginCmd.Flags().StringVar(&loginName, "name", "", "device/token name (defaults to hostname)")
 	loginCmd.Flags().BoolVar(&loginPlaintext, "allow-plaintext-token-store", false, "store the token in a 0600 file instead of the OS keychain")
 	loginCmd.Flags().StringVar(&loginMode, "mode", "agent", "access profile: agent|operator|observer")
@@ -103,7 +108,27 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	if loginMode != "agent" && loginMode != "operator" && loginMode != "observer" {
 		return output.Errf(output.CodeBadArgs, "--mode must be agent, operator, or observer")
 	}
-	res, err := auth.Login(pr, device, Version, loginMode, loginNoBrowser)
+	if (loginRemote && loginComplete) || (loginNoBrowser && (loginRemote || loginComplete)) {
+		return output.Errf(output.CodeBadArgs, "use only one of --no-browser, --remote, or --complete")
+	}
+	if loginRemote {
+		link, err := auth.StartDetached(pr, device, loginMode)
+		if err != nil {
+			return output.Errf(output.CodeAuth, "%v", err)
+		}
+		fmt.Println("Open this URL on any device, approve, then run 'contro1 auth login --complete':")
+		fmt.Println(link)
+		return nil
+	}
+	var res *auth.TokenResult
+	if loginComplete {
+		res, err = auth.CompleteDetached(pr, Version)
+		if errors.Is(err, auth.ErrPending) {
+			return output.Errf(output.CodeAuth, "approval is still pending; run this command again after approval")
+		}
+	} else {
+		res, err = auth.Login(pr, device, Version, loginMode, loginNoBrowser)
+	}
 	if err != nil {
 		return output.Errf(output.CodeAuth, "%v", err)
 	}

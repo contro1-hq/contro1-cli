@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -33,6 +34,131 @@ type TokenResult struct {
 	Scopes        []string
 	ExpiresAt     string
 	AccessProfile string
+}
+
+// ErrPending means approval has not happened yet; it is not an authentication
+// failure and callers may try CompleteDetached again before the five-minute TTL.
+var ErrPending = errors.New("remote authorization is still waiting for approval")
+
+type pendingRemoteLogin struct {
+	RelayID       string    `json:"relay_id"`
+	Verifier      string    `json:"verifier"`
+	DeviceName    string    `json:"device_name"`
+	AccessProfile string    `json:"access_profile"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+func pendingRemoteLoginPath() (string, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "pending-login.json"), nil
+}
+
+// StartDetached creates a remote approval rendezvous and persists only its
+// PKCE verifier locally, so a later CLI invocation can complete it.
+func StartDetached(pr *config.Profile, deviceName, accessProfile string) (string, error) {
+	verifier, challenge, err := pkce()
+	if err != nil {
+		return "", err
+	}
+	state, err := randomString(16)
+	if err != nil {
+		return "", err
+	}
+	payload, _ := json.Marshal(map[string]string{"code_challenge": challenge, "name": deviceName, "access_profile": accessProfile})
+	base := strings.TrimRight(pr.APIURL, "/") + "/api/centcom/auth/cli/relay"
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Post(base, "application/json", strings.NewReader(string(payload)))
+	if err != nil {
+		return "", fmt.Errorf("starting remote sign-in: %w", err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			RelayID string `json:"relay_id"`
+		} `json:"data"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusCreated || !created.OK || created.Data.RelayID == "" {
+		if created.Error.Message == "" {
+			created.Error.Message = "could not start remote sign-in"
+		}
+		return "", errors.New(created.Error.Message)
+	}
+	p := pendingRemoteLogin{RelayID: created.Data.RelayID, Verifier: verifier, DeviceName: deviceName, AccessProfile: accessProfile, CreatedAt: time.Now().UTC()}
+	path, err := pendingRemoteLoginPath()
+	if err != nil {
+		return "", err
+	}
+	b, _ := json.Marshal(p)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		return "", fmt.Errorf("saving pending sign-in: %w", err)
+	}
+	u, err := url.Parse(buildAuthorizeURL(pr.WebURL, challenge, state, deviceName, accessProfile, "", true))
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("mode", "relay")
+	q.Set("relay_id", p.RelayID)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// CompleteDetached finishes a detached login after approval. It deliberately
+// never accepts a code from chat or stdin: the relay plus the stored verifier
+// are the only path to a token.
+func CompleteDetached(pr *config.Profile, cliVersion string) (*TokenResult, error) {
+	path, err := pendingRemoteLoginPath()
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, errors.New("no pending remote sign-in; run 'contro1 auth login --remote' first")
+	}
+	var pending pendingRemoteLogin
+	if err := json.Unmarshal(b, &pending); err != nil || pending.RelayID == "" || pending.Verifier == "" {
+		return nil, errors.New("pending remote sign-in is invalid; start again")
+	}
+	if time.Since(pending.CreatedAt) > 5*time.Minute {
+		_ = os.Remove(path)
+		return nil, errors.New("pending remote sign-in expired; start again")
+	}
+	endpoint := strings.TrimRight(pr.APIURL, "/") + "/api/centcom/auth/cli/relay/" + url.PathEscape(pending.RelayID)
+	resp, err := http.Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("checking remote sign-in: %w", err)
+	}
+	defer resp.Body.Close()
+	var status struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			State string `json:"state"`
+			Code  string `json:"code"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil || !status.OK {
+		return nil, errors.New("could not read remote sign-in status")
+	}
+	if status.Data.State == "pending" {
+		return nil, ErrPending
+	}
+	if status.Data.State != "approved" || status.Data.Code == "" {
+		return nil, errors.New("remote authorization was not approved")
+	}
+	result, err := exchange(pr, status.Data.Code, pending.Verifier, pending.DeviceName, cliVersion)
+	if err == nil {
+		_ = os.Remove(path)
+	}
+	return result, err
 }
 
 func base64url(b []byte) string {
