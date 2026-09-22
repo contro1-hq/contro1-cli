@@ -264,8 +264,14 @@ func runConnectionStatus(cmd *cobra.Command, args []string) error {
 			if target == nil || len(target.Checks) > 0 {
 				continue
 			}
-			if agentID, err := (endpointVerifier{}).RuntimeStatus(cmd.Context(), e); err == nil && agentID == e.AgentID {
-				target.Checks = append(target.Checks, runtimeproto.Check{ID: "connected_securely", Label: "Connected securely", Status: runtimeproto.CheckOK, Message: runtimeproto.ModeLabel(e.EndpointMode)})
+			// The mode the server reports, not the one the mapping file was
+			// written with: an owner widens a connection after it is connected.
+			if agentID, liveMode, err := (endpointVerifier{}).RuntimeStatus(cmd.Context(), e); err == nil && agentID == e.AgentID {
+				mode := liveMode
+				if mode == "" {
+					mode = e.EndpointMode
+				}
+				target.Checks = append(target.Checks, runtimeproto.Check{ID: "connected_securely", Label: "Connected securely", Status: runtimeproto.CheckOK, Message: runtimeproto.ModeLabel(mode)})
 			} else {
 				msg := "not reachable"
 				if err != nil {

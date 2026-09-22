@@ -91,11 +91,11 @@ func (f *fakeBroker) SetPrincipals(context.Context, string, []broker.ControlPrin
 
 type fakeVerifier struct{ fail map[string]bool }
 
-func (f fakeVerifier) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, error) {
+func (f fakeVerifier) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, string, error) {
 	if f.fail[e.PlatformSubject] {
-		return "", errors.New("endpoint not reachable")
+		return "", "", errors.New("endpoint not reachable")
 	}
-	return e.AgentID, nil
+	return e.AgentID, e.EndpointMode, nil
 }
 func (f fakeVerifier) ControlMapPreview(context.Context, runtimeproto.MappingEntry) error { return nil }
 

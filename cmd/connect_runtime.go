@@ -350,16 +350,20 @@ func endpointClient(e runtimeproto.MappingEntry) (*client.Client, error) {
 	return client.NewWithHTTPClient(localipc.BaseURL, "", userAgent(), localipc.HTTPClient(ep, principal)), nil
 }
 
-func (endpointVerifier) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, error) {
+// RuntimeStatus returns who the endpoint speaks as and what the SERVER says
+// this connection may do. The second one is not in the mapping file: that is
+// written when the agent is connected and an owner widens a connection later.
+func (endpointVerifier) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, string, error) {
 	c, err := endpointClient(e)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	resp, err := c.Do("GET", "/api/centcom/v1/runtime/status", nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return str(asMap(resp["auth"])["agent_id"]), nil
+	auth := asMap(resp["auth"])
+	return str(auth["agent_id"]), str(auth["endpoint_mode"]), nil
 }
 
 func (endpointVerifier) ControlMapPreview(_ context.Context, e runtimeproto.MappingEntry) error {

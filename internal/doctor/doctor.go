@@ -34,7 +34,13 @@ type Env interface {
 	// is how a socket opens to one user before the peer-uid check narrows it.
 	ExpectedPrincipals(platform, subject string) ([]string, error)
 	// RuntimeStatus calls runtime status through the endpoint (no side effect).
-	RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (agentID string, remediation *runtimeproto.Remediation, err error)
+	//
+	// It returns the mode the SERVER reports, not the one in the mapping file.
+	// The mapping is written once, when the agent is connected, and the owner
+	// widens a connection afterwards: doctor used to ask the server and then
+	// print the number off the file, so a connection that had been allowed
+	// applications an hour earlier still read "Approvals only".
+	RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (agentID string, mode string, remediation *runtimeproto.Remediation, err error)
 	// ControlMapPreview runs the no-side-effect round trip.
 	ControlMapPreview(ctx context.Context, entry runtimeproto.MappingEntry) error
 	PlatformUser(platform string) string
@@ -200,7 +206,7 @@ func Run(ctx context.Context, env Env, platform string) Report {
 				add(&r, runtimeproto.Check{ID: id, Label: "Private endpoint for " + e.PlatformSubject, Status: runtimeproto.CheckOK, Message: "Only " + e.PlatformSubject + " can use it."})
 			}
 
-			agentID, rem, err := env.RuntimeStatus(ctx, e)
+			agentID, liveMode, rem, err := env.RuntimeStatus(ctx, e)
 			rid := "runtime_status:" + e.PlatformSubject
 			switch {
 			case err != nil && rem != nil:
@@ -210,7 +216,20 @@ func Run(ctx context.Context, env Env, platform string) Report {
 			case agentID != e.AgentID:
 				add(&r, runtimeproto.Check{ID: rid, Label: "Contro1 recognises " + e.PlatformSubject, Status: runtimeproto.CheckBlocked, Actor: "administrator", Message: fmt.Sprintf("The endpoint for %s speaks as %s, not %s.", e.PlatformSubject, agentID, e.AgentID), NextCommand: repair})
 			default:
-				add(&r, runtimeproto.Check{ID: rid, Label: "Contro1 recognises " + e.PlatformSubject, Status: runtimeproto.CheckOK, Message: runtimeproto.ModeLabel(e.EndpointMode) + "."})
+				mode := liveMode
+				if mode == "" {
+					// An older service that does not report it. The mapping is
+					// the only answer available and is marked as possibly stale
+					// rather than presented as current.
+					mode = e.EndpointMode
+				}
+				message := runtimeproto.ModeLabel(mode) + "."
+				if liveMode != "" && liveMode != e.EndpointMode {
+					// Worth saying: the endpoint serves what the server allows,
+					// and the file is what `contro1 connect` last wrote.
+					message += " The mapping file on this computer still says " + runtimeproto.ModeLabel(e.EndpointMode) + "; it is refreshed by contro1 connect."
+				}
+				add(&r, runtimeproto.Check{ID: rid, Label: "Contro1 recognises " + e.PlatformSubject, Status: runtimeproto.CheckOK, Message: message})
 				if err := env.ControlMapPreview(ctx, e); err != nil {
 					add(&r, runtimeproto.Check{ID: "round_trip:" + e.PlatformSubject, Label: "Approval round trip", Status: runtimeproto.CheckRepairable, Actor: "you", Message: err.Error(), NextCommand: repair})
 				} else {

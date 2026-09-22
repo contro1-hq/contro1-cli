@@ -114,7 +114,7 @@ type Broker interface {
 }
 
 type Verifier interface {
-	RuntimeStatus(ctx context.Context, e runtimeproto.MappingEntry) (agentID string, err error)
+	RuntimeStatus(ctx context.Context, e runtimeproto.MappingEntry) (agentID string, endpointMode string, err error)
 	ControlMapPreview(ctx context.Context, e runtimeproto.MappingEntry) error
 }
 
@@ -547,7 +547,7 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 	allOK := true
 	for _, e := range mapping.Entries {
 		agent := runtimeproto.AgentState{PlatformName: e.PlatformSubject, AgentID: e.AgentID, State: runtimeproto.StateConnected}
-		agentID, err := o.Verifier.RuntimeStatus(ctx, e)
+		agentID, _, err := o.Verifier.RuntimeStatus(ctx, e)
 		if err == nil && agentID != e.AgentID {
 			err = fmt.Errorf("endpoint speaks as %s", agentID)
 		}

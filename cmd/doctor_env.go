@@ -131,9 +131,9 @@ func (e *systemDoctorEnv) ExpectedPrincipals(_, subject string) ([]string, error
 	return out, nil
 }
 
-func (e *systemDoctorEnv) RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (string, *runtimeproto.Remediation, error) {
-	agentID, err := endpointVerifier{}.RuntimeStatus(ctx, entry)
-	return agentID, remediationOf(err), err
+func (e *systemDoctorEnv) RuntimeStatus(ctx context.Context, entry runtimeproto.MappingEntry) (string, string, *runtimeproto.Remediation, error) {
+	agentID, mode, err := endpointVerifier{}.RuntimeStatus(ctx, entry)
+	return agentID, mode, remediationOf(err), err
 }
 
 func (e *systemDoctorEnv) ControlMapPreview(ctx context.Context, entry runtimeproto.MappingEntry) error {
@@ -169,7 +169,7 @@ func (e *systemDoctorEnv) McpServers(ctx context.Context, platform, subject stri
 	if platform != "nanoclaw" {
 		return nil, errors.New("not reported by this platform")
 	}
-	out, err := platforms.ExecRunner(ctx, nclBinary(), "config", "get", "--id", subject, "--json")
+	out, err := platforms.ExecRunner(ctx, nclBinary(), "groups", "config", "get", "--id", subject, "--json")
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,7 @@ func (e *systemDoctorEnv) ContainerMounts(ctx context.Context, platform, subject
 	if platform != "nanoclaw" {
 		return nil, nil
 	}
-	out, err := platforms.ExecRunner(ctx, nclBinary(), "config", "get", "--id", subject, "--json")
+	out, err := platforms.ExecRunner(ctx, nclBinary(), "groups", "config", "get", "--id", subject, "--json")
 	if err != nil {
 		return nil, err
 	}

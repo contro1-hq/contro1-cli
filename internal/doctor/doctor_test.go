@@ -28,6 +28,7 @@ type fakeEnv struct {
 	mcpServers                    []McpServerConfig
 	mcpErr                        error
 	mounts                        []string
+	liveMode                      string
 }
 
 func (f *fakeEnv) McpServers(context.Context, string, string) ([]McpServerConfig, error) {
@@ -76,11 +77,12 @@ func (f *fakeEnv) ExpectedPrincipals(_, subject string) ([]string, error) {
 	}
 	return out, nil
 }
-func (f *fakeEnv) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, *runtimeproto.Remediation, error) {
+func (f *fakeEnv) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, string, *runtimeproto.Remediation, error) {
 	if f.remediation != nil {
-		return "", f.remediation, errors.New("refused")
+		return "", "", f.remediation, errors.New("refused")
 	}
-	return f.agentFor[e.Endpoint], nil, nil
+	// Empty unless a test sets it: an older service does not report the mode.
+	return f.agentFor[e.Endpoint], f.liveMode, nil, nil
 }
 func (f *fakeEnv) ControlMapPreview(context.Context, runtimeproto.MappingEntry) error { return nil }
 func (f *fakeEnv) PlatformUser(string) string                                         { return "dana" }
@@ -331,5 +333,42 @@ func TestApproverChecksSeparateConnectedFromGoverned(t *testing.T) {
 	r = Run(context.Background(), env, "nanoclaw")
 	if _, ok := findCheck(r, "approvals_reach_contro1:group-a"); ok {
 		t.Fatal("silence from the platform must not become a finding")
+	}
+}
+
+// Doctor asked the server and then printed the number off the mapping file.
+// An owner who had allowed applications an hour earlier still read
+// "Approvals only", which is the one line they would have gone to check.
+func TestTheModeReportedIsTheOneTheServerGives(t *testing.T) {
+	env := healthy()
+	env.liveMode = runtimeproto.ModeApplications // the owner widened it
+	// The mapping still says what `contro1 connect` wrote.
+	env.mapping.Entries[0].EndpointMode = runtimeproto.ModeApprovalsOnly
+
+	r := Run(context.Background(), env, "nanoclaw")
+	c, ok := findCheck(r, "runtime_status:group-a")
+	if !ok {
+		t.Fatal("the recognition check must be present")
+	}
+	if !strings.Contains(c.Message, runtimeproto.ModeLabel(runtimeproto.ModeApplications)) {
+		t.Fatalf("the live mode must lead: %q", c.Message)
+	}
+	// And the stale file is worth mentioning, because it is what the broker
+	// was configured from and somebody will wonder why they differ.
+	if !strings.Contains(c.Message, "mapping file on this computer still says") {
+		t.Fatalf("a disagreement must be named, not smoothed over: %q", c.Message)
+	}
+
+	// An older service that does not report the mode falls back to the file
+	// rather than printing nothing.
+	env = healthy()
+	env.liveMode = ""
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "runtime_status:group-a")
+	if !strings.Contains(c.Message, runtimeproto.ModeLabel(runtimeproto.ModeApprovalsOnly)) {
+		t.Fatalf("with no live answer the mapping is all there is: %q", c.Message)
+	}
+	if strings.Contains(c.Message, "still says") {
+		t.Fatalf("nothing to disagree with, so nothing to report: %q", c.Message)
 	}
 }
