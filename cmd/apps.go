@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -190,6 +191,28 @@ func init() {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
+			/*
+			 * A container that has no internet of its own needs its gateway to
+			 * let it through, and that gateway has no way to pass a hostname
+			 * without a credential for it.
+			 *
+			 * So the agent is issued one, and it is registered with the
+			 * platform's own gateway rather than written into anything the
+			 * container can read. It lives on the host, is injected at the
+			 * proxy, and does not appear in the group's configuration.
+			 *
+			 * This is the one place the value is shown. It has to be: somebody
+			 * pastes it into that form once. It is not written to a file, not
+			 * put in the journal, and not repeated in any later output.
+			 */
+			if platform == "nanoclaw" {
+				lease, err := issueAgentLease(conn)
+				if err != nil {
+					return output.Errf(output.CodeNetwork, "%v", err)
+				}
+				printGatewayRegistration(conn, lease)
+			}
+
 			prompt.Progress("Done. " + adapter.SafeTest())
 			return renderApplicationsResult(conn, status, journal)
 		},
@@ -298,4 +321,52 @@ func mcpURL() string {
 		api = "https://api.contro1.com"
 	}
 	return strings.TrimRight(api, "/") + "/api/centcom/mcp"
+}
+
+/*
+issueAgentLease asks Contro1 for a bounded credential for this agent.
+
+Only its accountable owner may ask, which the server enforces: whoever set up a
+computer is not whoever answers for what the agent then reads.
+*/
+func issueAgentLease(conn platforms.LocalConnection) (string, error) {
+	c, _, err := newClient()
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.Do("POST",
+		"/api/centcom/v1/runtime/connections/enrollments/"+url.PathEscape(conn.EnrollmentID)+"/lease",
+		map[string]any{})
+	if err != nil {
+		return "", fmt.Errorf("Contro1 would not issue a credential for this agent: %w", err)
+	}
+	lease, _ := resp["lease"].(string)
+	if lease == "" {
+		return "", errors.New("Contro1 did not return a credential")
+	}
+	return lease, nil
+}
+
+// printGatewayRegistration says exactly what to put where, in the words the
+// gateway's own form uses, so nobody has to translate anything.
+func printGatewayRegistration(conn platforms.LocalConnection, lease string) {
+	host := strings.TrimPrefix(strings.TrimPrefix(mcpURL(), "https://"), "http://")
+	if i := strings.Index(host, "/"); i > 0 {
+		host = host[:i]
+	}
+	fmt.Println()
+	fmt.Printf("One step left, once, for %s.\n", displayOf(conn))
+	fmt.Println("Its container reaches the internet only through NanoClaw's credential gateway,")
+	fmt.Println("which needs a credential for each hostname. Add this one there:")
+	fmt.Println()
+	fmt.Println("  Host pattern:   " + host)
+	fmt.Println("  Path pattern:   /*")
+	fmt.Println("  Inject as:      Header")
+	fmt.Println("  Header name:    Authorization")
+	fmt.Println("  Header value:   Bearer {value}")
+	fmt.Println("  Secret value:   " + lease)
+	fmt.Println()
+	fmt.Println("It is stored on this computer, not in the container, so the agent never")
+	fmt.Println("holds it. It expires, and you can revoke it in Contro1 at any time.")
+	fmt.Println("This is the only time it is shown.")
 }
