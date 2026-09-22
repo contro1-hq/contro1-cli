@@ -3,6 +3,7 @@ package platforms
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -61,55 +62,66 @@ func mcpArgsJSON(subject string) string {
 // NanoClaw
 // ---------------------------------------------------------------------------
 
+/*
+NANOCLAW REACHES CONTRO1 OVER HTTPS, NOT OVER THE LOCAL SOCKET.
+
+This was built the other way round first, mounting the agent's socket and the
+contro1 binary into its container, and it cannot work. NanoClaw's mount rules
+rewrite every container path under a fixed prefix, reject absolute ones, and
+have no way to ask for read-write: `ncl groups config add-mount` can set
+readonly true and never false. A unix socket mounted read-only cannot be
+connected to, so the socket could never have crossed that boundary.
+
+What the container can do is reach the public API, which is how the older
+setup was configured before this: `type: http` pointing at the MCP endpoint.
+That shape was right. What it lacked was a credential, which is why every call
+came back 401 while the agent reported itself connected.
+
+So the container is given a bounded bearer lease for this agent's own
+connection, in a header. It is issued by the accountable owner, it expires, it
+can be revoked, and the audit record says a key-bound connection lent it. No
+mounts, no allowlist, no socket leaving the host.
+*/
 func (n *nanoClaw) ApplicationChanges(conn LocalConnection) []Change {
-	socket := strings.TrimPrefix(conn.Endpoint, "unix://")
-	binary := contro1BinaryPath()
 	return []Change{
 		{
-			Kind:        "mount",
-			Path:        socket,
-			Description: "Mount this agent's own Contro1 socket into its container, and only this one, so the group can act as itself and as nothing else",
-			After:       fmt.Sprintf("%s groups config add-mount --id %s --host %s --container %s", n.bin(), conn.PlatformSubject, socket, socket),
-		},
-		{
-			Kind:        "mount",
-			Path:        binary,
-			Description: "Mount the contro1 binary into the container, read only. It carries no credential; the local Contro1 service holds the key",
-			After:       fmt.Sprintf("%s groups config add-mount --id %s --host %s --container /usr/local/bin/contro1 --ro", n.bin(), conn.PlatformSubject, binary),
+			Kind:        "credential",
+			Description: "Issue this agent a bounded credential for its container, which cannot hold its connection's key",
+			After:       "contro1 issues a lease for " + conn.AgentID + " (expires, and can be revoked at any time)",
 		},
 		{
 			Kind:        "mcp",
-			Description: "Point the agent's Contro1 MCP server at its own connection. Replaces any earlier entry, including one holding an API key",
-			After:       fmt.Sprintf("%s groups config add-mcp-server --id %s --name contro1 --command contro1 --args %s", n.bin(), conn.PlatformSubject, mcpArgsJSON(conn.PlatformSubject)),
+			Description: "Point the agent's Contro1 MCP server at Contro1, as itself. Replaces any earlier entry, including one with no credential",
+			After:       fmt.Sprintf("%s groups config add-mcp-server --id %s --name contro1 --url <api>/api/centcom/mcp --headers <credential>", n.bin(), conn.PlatformSubject),
 		},
 		{
 			Kind:        "restart",
-			Description: "Restart the agent group so the mounts and the server take effect",
+			Description: "Restart the agent group so the server is loaded",
 			After:       fmt.Sprintf("%s groups restart --id %s", n.bin(), conn.PlatformSubject),
 		},
 	}
 }
 
+// ApplyApplications needs the lease, so the caller issues it and passes it in.
+// It is never logged, never written to a file by this process, and reaches ncl
+// as one argument that ncl stores in the group's own config.
 func (n *nanoClaw) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
-	socket := strings.TrimPrefix(conn.Endpoint, "unix://")
-	binary := contro1BinaryPath()
-	// Checked before anything is changed: mounting a path that is not there
-	// produces a container that starts and fails at the first call, which is
-	// the exact silent mode this whole command exists to remove.
-	if _, err := os.Stat(socket); err != nil {
-		return fmt.Errorf("this agent's endpoint %s is not there; is the Contro1 service running? (contro1 doctor nanoclaw)", socket)
+	return errors.New("nanoclaw needs a credential for its container: use ApplyApplicationsWithCredential")
+}
+
+func (n *nanoClaw) ApplyApplicationsWithCredential(ctx context.Context, conn LocalConnection, mcpURL, lease string, j *Journal) error {
+	if lease == "" {
+		return errors.New("no credential was issued for this agent")
+	}
+	headers, err := json.Marshal(map[string]string{"Authorization": "Bearer " + lease})
+	if err != nil {
+		return err
 	}
 
-	// `config` is a VERB OF THE GROUPS RESOURCE, not a resource of its own:
-	// `ncl groups config add-mount`, never `ncl config add-mount`. The shorter
-	// form exits 1 with nothing useful, and it was in our own documentation
-	// too, so anybody following it by hand hit the same wall.
 	steps := [][]string{
-		{"groups", "config", "add-mount", "--id", conn.PlatformSubject, "--host", socket, "--container", socket},
-		{"groups", "config", "add-mount", "--id", conn.PlatformSubject, "--host", binary, "--container", "/usr/local/bin/contro1", "--ro"},
 		// Removed first, so an earlier entry cannot survive beside the new one.
 		{"groups", "config", "remove-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1"},
-		{"groups", "config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--command", "contro1", "--args", mcpArgsJSON(conn.PlatformSubject)},
+		{"groups", "config", "add-mcp-server", "--id", conn.PlatformSubject, "--name", "contro1", "--url", mcpURL, "--headers", string(headers)},
 		{"groups", "restart", "--id", conn.PlatformSubject},
 	}
 	for _, args := range steps {
@@ -118,9 +130,11 @@ func (n *nanoClaw) ApplyApplications(ctx context.Context, conn LocalConnection, 
 			if len(args) > 2 && args[2] == "remove-mcp-server" {
 				continue
 			}
-			return fmt.Errorf("%s %s: %w", n.bin(), strings.Join(args, " "), err)
+			// The lease is in one of these arguments, so the command is not
+			// echoed back in the error.
+			return fmt.Errorf("%s %s failed for %s: %w", n.bin(), strings.Join(args[:3], " "), conn.PlatformSubject, err)
 		}
-		j.RoleCommands = append(j.RoleCommands, n.bin()+" "+strings.Join(args, " "))
+		j.RoleCommands = append(j.RoleCommands, n.bin()+" "+strings.Join(args[:3], " ")+" --id "+conn.PlatformSubject)
 	}
 	return nil
 }

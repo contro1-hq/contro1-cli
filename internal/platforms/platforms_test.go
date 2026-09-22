@@ -387,32 +387,39 @@ func TestAnAgentInOnlyDirectMessagesIsSoleOperator(t *testing.T) {
 	}
 }
 
-// The container is where this silently fails: the MCP server runs inside it,
-// and without the mounts it starts, finds nothing and answers 401 forever while
-// the agent reports that it is connected.
-func TestNanoClawApplicationsMountsOnlyThisAgentsSocket(t *testing.T) {
-	dir := t.TempDir()
-	socket := filepath.Join(dir, "ep_sales.sock")
-	if err := os.WriteFile(socket, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
+/*
+The socket can never reach the container, which is why this is not mounted.
+
+NanoClaw rewrites every container path under a fixed prefix, rejects absolute
+ones, and `ncl groups config add-mount` can set readonly true and never false.
+A unix socket mounted read-only cannot be connected to. The container does
+reach the public API, which is how the older setup was written before this, and
+what it lacked was a credential.
+*/
+func TestNanoClawApplicationsUsesACredentialAndNoMounts(t *testing.T) {
 	conn := LocalConnection{
 		Platform: "nanoclaw", PlatformSubject: "ag-sales", DisplayName: "Nano ariel",
-		AgentID: "agt_sales", Endpoint: "unix://" + socket,
+		AgentID: "agt_sales", EnrollmentID: "enr_1", Endpoint: "unix:///run/contro1/ep/ep_sales.sock",
 	}
-
 	var ran [][]string
 	a, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
 		ran = append(ran, args)
 		return []byte("{}"), nil
 	}})
 
-	changes := a.ApplicationChanges(conn)
-	if len(changes) != 4 {
-		t.Fatalf("mounts, server and restart are all needed: %d changes", len(changes))
+	for _, c := range a.ApplicationChanges(conn) {
+		if c.Kind == "mount" {
+			t.Fatalf("nothing is mounted any more: %+v", c)
+		}
 	}
-	journal := &Journal{}
-	if err := a.ApplyApplications(context.Background(), conn, journal); err != nil {
+
+	withCredential, ok := a.(NeedsCredential)
+	if !ok {
+		t.Fatal("nanoclaw has to declare that its runtime needs a credential")
+	}
+	if err := withCredential.ApplyApplicationsWithCredential(
+		context.Background(), conn, "https://api.contro1.test/api/centcom/mcp", "ccr_live_secret", &Journal{},
+	); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 
@@ -420,50 +427,60 @@ func TestNanoClawApplicationsMountsOnlyThisAgentsSocket(t *testing.T) {
 	for _, args := range ran {
 		joined += strings.Join(args, " ") + "\n"
 	}
-	// `config` is a verb of the groups resource. `ncl config add-mount` exits 1
-	// with nothing useful, which is exactly how this shipped once.
-	for _, verb := range []string{"add-mount", "add-mcp-server", "remove-mcp-server"} {
+	if strings.Contains(joined, "add-mount") {
+		t.Fatalf("no mount may be attempted:\n%s", joined)
+	}
+	// `config` is a verb of the groups resource. `ncl config ...` exits with
+	// nothing useful, which is exactly how this shipped once.
+	for _, verb := range []string{"add-mcp-server", "remove-mcp-server"} {
 		if !strings.Contains(joined, "groups config "+verb) {
-			t.Fatalf("%s must be run as `ncl groups config %s`:\n%s", verb, verb, joined)
+			t.Fatalf("%s must run as `ncl groups config %s`:\n%s", verb, verb, joined)
 		}
 	}
-	// Only this agent's socket. A wider mount would let the group act as another.
-	if !strings.Contains(joined, "groups config add-mount --id ag-sales --host "+socket) {
-		t.Fatalf("the agent's own socket is not mounted:\n%s", joined)
-	}
-	if !strings.Contains(joined, "--container /usr/local/bin/contro1 --ro") {
-		t.Fatalf("the binary is not mounted read only:\n%s", joined)
-	}
-	// An older entry, including one holding an API key, must not survive.
+	// An older entry, including one with no credential, must not survive.
 	removeAt, addAt := strings.Index(joined, "remove-mcp-server"), strings.Index(joined, "add-mcp-server")
 	if removeAt < 0 || addAt < 0 || removeAt > addAt {
 		t.Fatalf("the old server must be removed before the new one is added:\n%s", joined)
 	}
-	if !strings.Contains(joined, `["mcp","serve","--agent","ag-sales"]`) {
-		t.Fatalf("the server must be pinned to this agent:\n%s", joined)
+	if !strings.Contains(joined, `--headers {"Authorization":"Bearer ccr_live_secret"}`) {
+		t.Fatalf("the credential must reach the platform:\n%s", joined)
 	}
 	if !strings.HasSuffix(strings.TrimSpace(joined), "groups restart --id ag-sales") {
 		t.Fatalf("the group must restart last:\n%s", joined)
 	}
-	if len(journal.RoleCommands) < 4 {
-		t.Fatalf("every applied step is journalled: %v", journal.RoleCommands)
-	}
 }
 
-// Mounting a path that is not there produces a container that starts and fails
-// at the first call, which is the failure mode this command exists to remove.
-func TestNanoClawApplicationsRefusesWhenTheEndpointIsMissing(t *testing.T) {
-	conn := LocalConnection{Platform: "nanoclaw", PlatformSubject: "ag-x", Endpoint: "unix:///run/contro1/ep/not-there.sock"}
-	var ran int
-	a, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
-		ran++
-		return nil, nil
+// The credential is the one thing here that must not end up anywhere a person
+// reads: not in an error, not in the journal, not in a log.
+func TestTheCredentialIsNeverEchoedBack(t *testing.T) {
+	conn := LocalConnection{Platform: "nanoclaw", PlatformSubject: "ag-x", AgentID: "agt_x", EnrollmentID: "enr_x"}
+	failing, _ := New("nanoclaw", Options{Home: t.TempDir(), Runner: func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) > 2 && args[2] == "add-mcp-server" {
+			return nil, errors.New("ncl said no")
+		}
+		return []byte("{}"), nil
 	}})
-	err := a.ApplyApplications(context.Background(), conn, &Journal{})
-	if err == nil || !strings.Contains(err.Error(), "doctor") {
-		t.Fatalf("a missing endpoint must stop and point somewhere useful: %v", err)
+	journal := &Journal{}
+	err := failing.(NeedsCredential).ApplyApplicationsWithCredential(
+		context.Background(), conn, "https://api.contro1.test/api/centcom/mcp", "ccr_live_verysecret", journal,
+	)
+	if err == nil {
+		t.Fatal("the failure must surface")
 	}
-	if ran != 0 {
-		t.Fatalf("nothing may be changed before the endpoint is known to exist, ran %d", ran)
+	if strings.Contains(err.Error(), "ccr_live_verysecret") {
+		t.Fatalf("the credential is in the error: %v", err)
+	}
+	for _, line := range journal.RoleCommands {
+		if strings.Contains(line, "ccr_live_verysecret") {
+			t.Fatalf("the credential is in the journal: %s", line)
+		}
+	}
+
+	// And an apply with no credential refuses rather than configuring an entry
+	// that would answer 401 to everything, which is the state this replaces.
+	if err := failing.(NeedsCredential).ApplyApplicationsWithCredential(
+		context.Background(), conn, "https://api.contro1.test/api/centcom/mcp", "", &Journal{},
+	); err == nil {
+		t.Fatal("no credential must be refused, not configured")
 	}
 }

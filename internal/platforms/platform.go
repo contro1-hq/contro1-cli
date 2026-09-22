@@ -99,6 +99,12 @@ type Adapter interface {
 	SafeTest() string
 }
 
+// NeedsCredential is implemented by a platform whose runtime cannot hold this
+// connection's key and is given a bounded bearer for it instead.
+type NeedsCredential interface {
+	ApplyApplicationsWithCredential(ctx context.Context, conn LocalConnection, mcpURL, lease string, j *Journal) error
+}
+
 // Runner executes platform CLIs; tests substitute a fake.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
