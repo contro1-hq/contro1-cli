@@ -159,7 +159,28 @@ func renderInvocation(pr *config.Profile, m map[string]any) error {
 	if note := explainActionState(str(m["state"])); note != "" {
 		infof("%s", note)
 	}
+	if notRun := asMap(m["not_run"]); len(notRun) > 0 {
+		infof("Accepted but not run: %s", str(notRun["message"]))
+	}
+	if reason := str(m["result_unavailable"]); reason != "" {
+		infof("%s", reason)
+	} else if _, ok := m["result"]; ok && outFormat(pr) != "json" {
+		infof("The Action returned a result; add --format json to print it.")
+	}
 	return output.Render(outFormat(pr), m, actionInvocationTable(m))
+}
+
+// withOutcome keeps what the server said about the result next to the
+// invocation. Rendering only `invocation` dropped the output an Action
+// produced, and the reason when there was none.
+func withOutcome(resp map[string]any) map[string]any {
+	invocation := asMap(resp["invocation"])
+	for _, key := range []string{"result", "result_unavailable", "not_run"} {
+		if value, ok := resp[key]; ok {
+			invocation[key] = value
+		}
+	}
+	return invocation
 }
 
 func fetchInvocation(id string) (map[string]any, *config.Profile, error) {
@@ -183,7 +204,7 @@ func fetchInvocation(id string) (map[string]any, *config.Profile, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return asMap(resp["invocation"]), pr, nil
+	return withOutcome(resp), pr, nil
 }
 
 func runActionGet(_ *cobra.Command, args []string) error {
@@ -246,11 +267,10 @@ func runActionInvoke(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	invocation := asMap(resp["invocation"])
-	if len(invocation) == 0 {
+	if len(asMap(resp["invocation"])) == 0 {
 		return output.Render(outFormat(pr), resp, nil)
 	}
-	return renderInvocation(pr, invocation)
+	return renderInvocation(pr, withOutcome(resp))
 }
 
 func runActionCancel(_ *cobra.Command, args []string) error {

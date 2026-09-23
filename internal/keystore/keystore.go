@@ -63,7 +63,8 @@ func ValidID(id string) error {
 type Options struct {
 	// Dir holds file keys. Required for file stores.
 	Dir string
-	// Machine puts CNG keys in the machine key container (the Windows service).
+	// Machine puts CNG keys in the machine key container. The Windows service
+	// does NOT use it: its account cannot write there (see broker.New).
 	Machine bool
 	// PreferTPM uses the Microsoft Platform Crypto Provider on Windows.
 	PreferTPM bool

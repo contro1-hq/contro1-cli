@@ -90,7 +90,17 @@ func New(cfg Config) (*Broker, error) {
 		cfg.APIURL = st.APIURL
 	}
 	if cfg.Keys == nil {
-		cfg.Keys, err = keystore.Default(keystore.Options{Dir: filepath.Join(cfg.StateDir, "keys"), Machine: !cfg.Foreground && runtime.GOOS == "windows", Development: cfg.Foreground})
+		/*
+		 * NEVER THE MACHINE KEY CONTAINER. The service runs as
+		 * `NT SERVICE\Contro1Broker`, and only SYSTEM and Administrators may
+		 * write C:\ProgramData\Microsoft\Crypto\Keys, so every key it tried to
+		 * create there failed at NCryptFinalizeKey with NTE_PERM and no agent on
+		 * Windows could ever connect. The service account's own container, under
+		 * its profile, is writable by it alone - which is also the stronger
+		 * place: a machine key is usable by any administrator. The export
+		 * policy is unchanged, so the private key still cannot leave.
+		 */
+		cfg.Keys, err = keystore.Default(keystore.Options{Dir: filepath.Join(cfg.StateDir, "keys"), Development: cfg.Foreground})
 		if err != nil {
 			store.Close()
 			return nil, err

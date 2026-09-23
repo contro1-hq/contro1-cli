@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -51,6 +52,81 @@ func TestHTTPOverPipe(t *testing.T) {
 	parsed, err := ParseEndpoint(ep.String())
 	if err != nil || parsed != ep {
 		t.Fatalf("round trip %v %v", parsed, err)
+	}
+}
+
+// The peer is identified by impersonation, which needs bytes read first. Those
+// bytes are handed back to the reader, so a body larger than the first read
+// must arrive whole, and the server must see the caller's real identity.
+func TestFirstReadIsReturnedAndThePeerIsTheRealCaller(t *testing.T) {
+	ep, me := testPipe(t)
+	l, err := Listen(ListenSpec{Endpoint: ep, AllowedPrincipals: []Principal{Principal(me.User)}, SDDL: DataSDDL(me.User, me.User)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen Identity
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			_, _ = io.WriteString(w, fmt.Sprint(len(body)))
+		}),
+		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
+			seen, _ = PeerOf(c)
+			return ctx
+		},
+	}
+	go srv.Serve(l)
+	defer srv.Close()
+
+	payload := strings.Repeat("x", 3*4096+17)
+	resp, err := HTTPClient(ep, Principal(me.User)).Post(BaseURL+"/echo", "text/plain", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != fmt.Sprint(len(payload)) {
+		t.Fatalf("server saw %s bytes, sent %d", body, len(payload))
+	}
+	if seen.User != me.User {
+		t.Fatalf("server identified the caller as %q, want %q", seen.User, me.User)
+	}
+}
+
+// A client that connects and never writes cannot be identified. It is dropped
+// after a bound, and the next caller is still served.
+func TestASilentClientIsDroppedAndDoesNotBlockOthers(t *testing.T) {
+	restore := firstReadTimeout
+	firstReadTimeout = 200 * time.Millisecond
+	defer func() { firstReadTimeout = restore }()
+
+	ep, me := testPipe(t)
+	l, err := Listen(ListenSpec{Endpoint: ep, AllowedPrincipals: []Principal{Principal(me.User)}, SDDL: DataSDDL(me.User, me.User)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	})}
+	go srv.Serve(l)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	silent, err := Dial(ctx, ep, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+
+	resp, err := HTTPClient(ep, Principal(me.User)).Get(BaseURL + "/ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "ok" {
+		t.Fatalf("body %q", body)
 	}
 }
 

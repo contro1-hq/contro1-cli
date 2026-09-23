@@ -20,7 +20,8 @@ func init() {
 		Long: "OAuth credentials for MCP are stored separately from CLI API credentials. The local adapter forwards JSON-RPC only; policy, grants and Action execution remain on the remote server.",
 	}
 	var clientName string
-	login := &cobra.Command{Use: "login", Short: "Authorize the local MCP adapter with OAuth 2.1 + PKCE", RunE: func(_ *cobra.Command, _ []string) error {
+	var allowExecute bool
+	login := &cobra.Command{Use: "login", Short: "Authorize the local MCP adapter; approve on any device with a code", RunE: func(_ *cobra.Command, _ []string) error {
 		_, profile, name, err := loadCtx()
 		if err != nil {
 			return err
@@ -29,7 +30,7 @@ func init() {
 		if flagAPIURL != "" {
 			apiURL = flagAPIURL
 		}
-		credentials, err := mcpbridge.Login(apiURL, name, clientName)
+		credentials, err := mcpbridge.Login(apiURL, name, clientName, allowExecute)
 		if err != nil {
 			return err
 		}
@@ -38,6 +39,7 @@ func init() {
 		return nil
 	}}
 	login.Flags().StringVar(&clientName, "client-name", "contro1 CLI stdio adapter", "name shown on the OAuth consent screen")
+	login.Flags().BoolVar(&allowExecute, "execute", false, "also ask to run Actions ("+mcpbridge.ExecuteScope+"); they run with your own authority and are recorded as yours")
 	status := &cobra.Command{Use: "status", Short: "Show local MCP OAuth status", RunE: func(_ *cobra.Command, _ []string) error {
 		_, _, name, err := loadCtx()
 		if err != nil {

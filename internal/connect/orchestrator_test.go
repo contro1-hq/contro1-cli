@@ -64,6 +64,9 @@ type fakeBroker struct {
 	healthy     bool
 	registerErr error
 	registered  []broker.ControlConnectionsRequest
+	// itemError, when set, is what the service reports for every item: it
+	// answered, but could not prepare the keys.
+	itemError string
 }
 
 func (f *fakeBroker) Healthy(context.Context) bool { return f.healthy }
@@ -75,6 +78,10 @@ func (f *fakeBroker) Register(_ context.Context, _ string, req broker.ControlCon
 	var out []broker.ControlItemResult
 	var entries []runtimeproto.MappingEntry
 	for _, it := range req.Items {
+		if f.itemError != "" {
+			out = append(out, broker.ControlItemResult{ItemID: it.ItemID, State: "failed", Error: f.itemError})
+			continue
+		}
 		out = append(out, broker.ControlItemResult{ItemID: it.ItemID, State: "awaiting_approval", JKT: "jkt"})
 		entries = append(entries, runtimeproto.MappingEntry{PlatformSubject: it.PlatformSubject, AgentID: it.AgentID, EnrollmentID: it.EnrollmentID, EndpointMode: it.EndpointMode, Endpoint: "npipe:////./pipe/contro1-ep-" + it.PlatformSubject})
 	}
@@ -256,6 +263,57 @@ func TestHappyPathAndWaitingForOwner(t *testing.T) {
 	}
 	if api.reports["itm_main"] != "configured" || api.reports["itm_research"] != "configured" {
 		t.Fatalf("item results reported: %+v", api.reports)
+	}
+}
+
+// A registered batch that expired used to end the run with "the approval
+// request expired, run the same command again". It is replaced in the same run.
+func TestAnExpiredBatchIsReplacedInTheSameRun(t *testing.T) {
+	o, api, br, _, _ := setup(t)
+	api.batch = BatchView{BatchID: "con_1", State: "pending", Link: "https://app/connect/con_1"}
+	opts := base()
+	opts.Yes, opts.NoWait = true, true
+	o.Run(context.Background(), opts)
+
+	st, _ := o.States.Load("openclaw")
+	st.BatchExpiresAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	_ = o.States.Save("openclaw", st)
+
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateWaitingForOwner {
+		t.Fatalf("an expired batch must be replaced, not reported: %+v", ns)
+	}
+	if api.prepares != 2 || len(br.registered) != 2 {
+		t.Fatalf("a fresh batch is prepared and registered: prepares=%d registered=%d", api.prepares, len(br.registered))
+	}
+
+	// Asking for that exact batch by name still hears that it expired.
+	st, _ = o.States.Load("openclaw")
+	st.BatchExpiresAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	_ = o.States.Save("openclaw", st)
+	api.batch.State = "expired"
+	resume := opts
+	resume.Resume = st.BatchID
+	if ns := o.Run(context.Background(), resume); ns.State != runtimeproto.StateError {
+		t.Fatalf("an explicit --resume reports the expiry: %+v", ns)
+	}
+}
+
+// The service answered but could not create the keys. That was written to the
+// state file and the run went on to "the owner needs to approve", while the
+// approval page had no key to approve and offered no button.
+func TestKeyFailuresAreReportedNotHidden(t *testing.T) {
+	o, api, br, _, _ := setup(t)
+	br.itemError = "could not create a key: keystore: finalize CNG key: CNG status 0x80090010"
+	api.batch = BatchView{BatchID: "con_1", State: "pending", Link: "https://app/connect/con_1"}
+	opts := base()
+	opts.Yes, opts.NoWait = true, true
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateError || !strings.Contains(ns.Message, "0x80090010") {
+		t.Fatalf("the key failure must be the result, in words: %+v", ns)
+	}
+	if ns.NextCommand != "contro1 doctor openclaw" {
+		t.Fatalf("and it points at doctor: %q", ns.NextCommand)
 	}
 }
 

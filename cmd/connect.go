@@ -121,8 +121,12 @@ func renderNextStep(ns runtimeproto.NextStep) error {
 			mark = "!"
 		}
 		fmt.Printf("%s %s\n", mark, ns.Message)
-		if ns.UserCode != "" {
-			fmt.Printf("  Approve at %s   Code: %s\n", ns.ShareThisLink, ns.UserCode)
+		if ns.ShareThisLink != "" {
+			if ns.UserCode != "" {
+				fmt.Printf("  Approve at %s   Code: %s\n", ns.ShareThisLink, ns.UserCode)
+			} else {
+				fmt.Printf("  Approve at %s\n", ns.ShareThisLink)
+			}
 		}
 		for _, c := range ns.Checks {
 			if c.Status != runtimeproto.CheckOK {

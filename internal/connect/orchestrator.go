@@ -261,10 +261,20 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		_ = o.States.Save(p, st)
 	}
 
-	// A batch that expired before the service registered it is abandoned.
-	if st.BatchID != "" && !st.Registered {
+	/*
+	 * AN EXPIRED BATCH IS ABANDONED, AND A NEW ONE STARTS IN THE SAME RUN.
+	 *
+	 * This used to apply only to a batch the service had not registered. A
+	 * registered one that expired was carried forward, polled, found expired,
+	 * and the run ended with "the approval request expired" and an instruction
+	 * to run the same command again - which then worked, because that failure
+	 * had just cleared the state. Nothing was gained by making the person do it.
+	 * Only an explicit --resume of that batch still reports the expiry: they
+	 * asked for that batch and should hear what happened to it.
+	 */
+	if st.BatchID != "" && opts.Resume == "" {
 		if exp, err := time.Parse(time.RFC3339, st.BatchExpiresAt); err == nil && o.Now().After(exp) {
-			st.BatchID, st.Items = "", nil
+			st.BatchID, st.Items, st.Registered = "", nil, false
 		}
 	}
 
@@ -395,10 +405,26 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 				save("register_failed")
 				return ns
 			}
+			var failed []string
 			for _, r := range results {
 				if r.State != "awaiting_approval" {
 					st.Results[r.ItemID] = "failed: " + r.Error
+					failed = append(failed, r.Error)
 				}
+			}
+			/*
+			 * SAID, NOT ONLY WRITTEN TO THE STATE FILE. A key that could not be
+			 * created was recorded here and the run carried on to "the owner
+			 * needs to approve" - while the approval page, which had no key to
+			 * approve, said the connection was still being prepared and offered
+			 * no button. The owner waits for something that cannot happen.
+			 */
+			if len(failed) > 0 && len(failed) == len(results) {
+				st.BatchID, st.Items = "", nil
+				save("register_failed")
+				ns := step(p, runtimeproto.StateError, "The Contro1 service could not prepare the agent keys: "+strings.Join(failed, "; "))
+				ns.NextCommand = "contro1 doctor " + p
+				return ns
 			}
 			st.Registered = true
 			save("registered")
@@ -439,8 +465,13 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 				for _, it := range st.Items {
 					ns.Agents = append(ns.Agents, runtimeproto.AgentState{PlatformName: it.PlatformSubject, AgentID: it.AgentID, State: runtimeproto.StateWaitingForOwner})
 				}
-				if !announced && view.UserCode != "" {
-					o.Prompt.Progress(fmt.Sprintf("Approve at %s   Code: %s", view.Link, view.UserCode))
+				// The link alone is enough to approve; a code is not always issued.
+				if !announced && view.Link != "" {
+					msg := "Approve at " + view.Link
+					if view.UserCode != "" {
+						msg += "   Code: " + view.UserCode
+					}
+					o.Prompt.Progress(msg)
 					announced = true
 				}
 				if opts.NoWait || o.Now().After(deadline) {

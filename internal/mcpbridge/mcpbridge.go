@@ -6,14 +6,9 @@ package mcpbridge
 import (
 	"bufio"
 	"bytes"
-	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -61,14 +56,6 @@ func Load(profile string) (*Credentials, error) {
 	return &credentials, nil
 }
 
-func randomURLString(size int) (string, error) {
-	b := make([]byte, size)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
 func postJSON(endpoint string, payload any, out any) error {
 	raw, _ := json.Marshal(payload)
 	response, err := (&http.Client{Timeout: 30 * time.Second}).Post(endpoint, "application/json", bytes.NewReader(raw))
@@ -108,93 +95,137 @@ func exchange(apiURL string, form url.Values) (*Credentials, error) {
 	return &Credentials{AccessToken: result.AccessToken, RefreshToken: result.RefreshToken, Scope: result.Scope, ExpiresAt: time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Unix()}, nil
 }
 
-func Login(apiURL, profile, clientName string) (*Credentials, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+const deviceCodeGrant = "urn:ietf:params:oauth:grant-type:device_code"
+
+// ExecuteScope lets the connection run Actions with the approving person's own
+// authority. It is never in the default set: the person asks for it by name.
+const ExecuteScope = "mcp:actions:execute"
+
+// minPollInterval is RFC 8628's default of five seconds. A variable only so a
+// test does not have to wait for it.
+var minPollInterval = 5 * time.Second
+
+// openURL is swapped in tests so they do not open a real browser.
+var openURL = browser.OpenURL
+
+// Login connects with the device grant (RFC 8628). It used to open a loopback
+// listener and register a 127.0.0.1 redirect, which the server refuses: a code
+// sent to loopback only reaches the machine that opened the link, and the
+// person approving is often holding a phone. The device grant needs no
+// redirect, so the approval can happen on any device.
+func Login(apiURL, profile, clientName string, execute bool) (*Credentials, error) {
+	credentials, err := deviceLogin(apiURL, clientName, execute)
 	if err != nil {
 		return nil, err
 	}
-	defer listener.Close()
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", listener.Addr().(*net.TCPAddr).Port)
+	if err := Store(profile, *credentials); err != nil {
+		return nil, err
+	}
+	return credentials, nil
+}
+
+func deviceLogin(apiURL, clientName string, execute bool) (*Credentials, error) {
+	base := strings.TrimRight(apiURL, "/")
+	scope := defaultScopes
+	if execute {
+		scope += " " + ExecuteScope
+	}
 	var registered struct {
 		ClientID string `json:"client_id"`
 	}
-	if err := postJSON(strings.TrimRight(apiURL, "/")+"/api/centcom/mcp/oauth/register", map[string]any{
-		"client_name": clientName, "redirect_uris": []string{redirectURI}, "scope": defaultScopes,
+	if err := postJSON(base+"/api/centcom/mcp/oauth/register", map[string]any{
+		"client_name": clientName, "grant_types": []string{deviceCodeGrant, "refresh_token"}, "scope": scope,
 	}, &registered); err != nil {
 		return nil, fmt.Errorf("dynamic client registration: %w", err)
 	}
 
-	verifier, err := randomURLString(48)
-	if err != nil {
-		return nil, err
+	var started struct {
+		DeviceCode              string `json:"device_code"`
+		UserCode                string `json:"user_code"`
+		VerificationURI         string `json:"verification_uri"`
+		VerificationURIComplete string `json:"verification_uri_complete"`
+		ExpiresIn               int64  `json:"expires_in"`
+		Interval                int64  `json:"interval"`
 	}
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	state, err := randomURLString(18)
-	if err != nil {
-		return nil, err
+	if err := postForm(base+"/api/centcom/mcp/oauth/device_authorization", url.Values{
+		"client_id": {registered.ClientID}, "scope": {scope}, "resource": {resourceURL(apiURL)},
+	}, &started); err != nil {
+		return nil, fmt.Errorf("starting device authorization: %w", err)
 	}
-	result := make(chan struct {
-		code string
-		err  error
-	}, 1)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("state") != state {
-			result <- struct {
-				code string
-				err  error
-			}{"", fmt.Errorf("OAuth state mismatch")}
-			return
-		}
-		if oauthError := request.URL.Query().Get("error"); oauthError != "" {
-			result <- struct {
-				code string
-				err  error
-			}{"", fmt.Errorf("authorization denied: %s", oauthError)}
-			return
-		}
-		fmt.Fprint(w, "Contro1 MCP connected. You can close this window.")
-		result <- struct {
-			code string
-			err  error
-		}{request.URL.Query().Get("code"), nil}
-	})
-	server := &http.Server{Handler: mux}
-	go server.Serve(listener)
-	defer server.Shutdown(context.Background())
 
-	authorize, _ := url.Parse(strings.TrimRight(apiURL, "/") + "/api/centcom/mcp/oauth/authorize")
-	query := authorize.Query()
-	query.Set("client_id", registered.ClientID)
-	query.Set("redirect_uri", redirectURI)
-	query.Set("scope", defaultScopes)
-	query.Set("state", state)
-	query.Set("response_type", "code")
-	query.Set("code_challenge", challenge)
-	query.Set("code_challenge_method", "S256")
-	query.Set("resource", resourceURL(apiURL))
-	authorize.RawQuery = query.Encode()
-	fmt.Fprintln(os.Stderr, "Opening a browser to authorize Contro1 MCP...")
-	fmt.Fprintln(os.Stderr, "If it does not open, visit:\n  "+authorize.String())
-	_ = browser.OpenURL(authorize.String())
-	select {
-	case received := <-result:
-		if received.err != nil {
-			return nil, received.err
-		}
-		credentials, err := exchange(apiURL, url.Values{"grant_type": {"authorization_code"}, "code": {received.code}, "client_id": {registered.ClientID}, "redirect_uri": {redirectURI}, "code_verifier": {verifier}, "resource": {resourceURL(apiURL)}})
-		if err != nil {
+	// The code and the address are printed separately, because typing the code
+	// on another device is the path that always works.
+	fmt.Fprintln(os.Stderr, "To connect, open this address on any device and approve:")
+	fmt.Fprintln(os.Stderr, "  "+started.VerificationURI)
+	fmt.Fprintln(os.Stderr, "and enter the code:  "+started.UserCode)
+	if started.VerificationURIComplete != "" {
+		_ = openURL(started.VerificationURIComplete)
+	}
+
+	interval := max(time.Duration(started.Interval)*time.Second, minPollInterval)
+	deadline := time.Now().Add(time.Duration(max(started.ExpiresIn, 60)) * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+		credentials, oauthError, err := exchangeDevice(apiURL, url.Values{
+			"grant_type": {deviceCodeGrant}, "device_code": {started.DeviceCode}, "client_id": {registered.ClientID},
+		})
+		switch {
+		case err != nil:
 			return nil, err
+		case oauthError == "authorization_pending":
+			continue
+		case oauthError == "slow_down":
+			interval += minPollInterval
+			continue
+		case oauthError == "access_denied":
+			return nil, fmt.Errorf("the connection was declined in Contro1")
+		case oauthError == "expired_token":
+			return nil, fmt.Errorf("the code expired before it was approved; run 'contro1 mcp login' again")
+		case oauthError != "":
+			return nil, fmt.Errorf("device authorization failed: %s", oauthError)
 		}
 		credentials.ClientID = registered.ClientID
-		if err := Store(profile, *credentials); err != nil {
-			return nil, err
-		}
 		return credentials, nil
-	case <-time.After(5 * time.Minute):
-		return nil, fmt.Errorf("timed out waiting for browser authorization")
 	}
+	return nil, fmt.Errorf("the code expired before it was approved; run 'contro1 mcp login' again")
+}
+
+func postForm(endpoint string, form url.Values, out any) error {
+	response, err := (&http.Client{Timeout: 30 * time.Second}).PostForm(endpoint, form)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		return fmt.Errorf("OAuth endpoint returned %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return json.NewDecoder(response.Body).Decode(out)
+}
+
+// exchangeDevice polls the token endpoint once. A pending or slowed-down poll
+// is not an error: it comes back as the OAuth error code for the caller to
+// branch on, and only a transport or decoding failure is returned as err.
+func exchangeDevice(apiURL string, form url.Values) (*Credentials, string, error) {
+	response, err := (&http.Client{Timeout: 30 * time.Second}).PostForm(strings.TrimRight(apiURL, "/")+"/api/centcom/mcp/oauth/token", form)
+	if err != nil {
+		return nil, "", err
+	}
+	defer response.Body.Close()
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+		Error        string `json:"error"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return nil, "", fmt.Errorf("token endpoint returned %d with an unreadable body", response.StatusCode)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, first(result.Error, fmt.Sprintf("http_%d", response.StatusCode)), nil
+	}
+	return &Credentials{AccessToken: result.AccessToken, RefreshToken: result.RefreshToken, Scope: result.Scope, ExpiresAt: time.Now().Add(time.Duration(result.ExpiresIn) * time.Second).Unix()}, "", nil
 }
 
 func refresh(apiURL, profile string, credentials *Credentials) error {
@@ -408,7 +439,12 @@ func ServeViaEndpoint(client *http.Client, baseURL string, input io.Reader, outp
 			}
 			body, _ := io.ReadAll(io.LimitReader(response.Body, 8<<20))
 			response.Body.Close()
-			if response.StatusCode == http.StatusAccepted {
+			if response.StatusCode == http.StatusAccepted || len(bytes.TrimSpace(body)) == 0 {
+				// A notification has no id and gets nothing back. A REQUEST
+				// must be answered: returning silently left the client
+				// waiting for an id that never came, which is how one of
+				// three calls in a session simply vanished.
+				write(jsonRPCRelayError(line, -32000, "Contro1 returned no answer to this request; try it again"))
 				return
 			}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {

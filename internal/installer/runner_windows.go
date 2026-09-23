@@ -161,15 +161,28 @@ func removeService() error {
 
 // ServiceStatus is used by doctor: installed, running, automatic start.
 func ServiceStatus() (installed, running, automatic bool, account string) {
-	m, err := mgr.Connect()
+	/*
+	 * QUERY RIGHTS ONLY. mgr.Connect asks for SC_MANAGER_ALL_ACCESS, which a
+	 * person running `contro1 doctor` unelevated does not have, so the call
+	 * failed and doctor reported a running service as "not installed" - and
+	 * told the reader to run connect again. Reading status needs connect and
+	 * query rights, which every user has.
+	 */
+	h, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return
 	}
+	m := &mgr.Mgr{Handle: h}
 	defer m.Disconnect()
-	s, err := m.OpenService(brokerpaths.ServiceName)
+	name, err := windows.UTF16PtrFromString(brokerpaths.ServiceName)
 	if err != nil {
 		return
 	}
+	sh, err := windows.OpenService(h, name, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		return
+	}
+	s := &mgr.Service{Name: brokerpaths.ServiceName, Handle: sh}
 	defer s.Close()
 	installed = true
 	if st, err := s.Query(); err == nil {
