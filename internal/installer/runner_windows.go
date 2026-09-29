@@ -58,6 +58,13 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 			if err := os.MkdirAll(filepath.Dir(plan.Binary.Dest), 0o755); err != nil {
 				return err
 			}
+			// AN UPGRADE REPLACES A RUNNING BINARY. Windows will not overwrite an
+			// executable a process has open, so connecting with a newer CLI failed
+			// here while the service ran the old one. Stop it first; the "start"
+			// step below finds it stopped and starts it on the new binary.
+			if err := stopServiceIfRunning(); err != nil {
+				return err
+			}
 			return copyFile(plan.Binary.Source, plan.Binary.Dest)
 		},
 		Undo: func() error { return os.Remove(plan.Binary.Dest) },
@@ -142,6 +149,34 @@ func serviceState() (svc.State, error) {
 	defer s.Close()
 	st, err := s.Query()
 	return st.State, err
+}
+
+// stopServiceIfRunning stops the broker service and waits for it to let go of
+// its binary. A service that does not exist, or is already stopped, is fine.
+func stopServiceIfRunning() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(brokerpaths.ServiceName)
+	if err != nil {
+		return nil
+	}
+	defer s.Close()
+	st, err := s.Query()
+	if err != nil || st.State == svc.Stopped {
+		return nil
+	}
+	if _, err := s.Control(svc.Stop); err != nil {
+		return fmt.Errorf("stop the Contro1 service before upgrading it: %w", err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+		if st, err = s.Query(); err == nil && st.State == svc.Stopped {
+			return nil
+		}
+	}
+	return errors.New("the Contro1 service did not stop within 30 seconds, so its binary could not be replaced")
 }
 
 func removeService() error {

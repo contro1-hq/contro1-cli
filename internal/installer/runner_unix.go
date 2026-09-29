@@ -83,11 +83,18 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 		steps = append(steps, Step{ID: "launchd", Do: func() error {
 			return run("launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.contro1.broker.plist")
 		}, Undo: func() error { return run("launchctl", "bootout", "system/com.contro1.broker") }})
+		// An upgrade replaced the binary under a running daemon; -k restarts it on the new one.
+		steps = append(steps, Step{ID: "restart", Do: func() error {
+			return run("launchctl", "kickstart", "-k", "system/com.contro1.broker")
+		}})
 	} else {
 		steps = append(steps,
 			Step{ID: "daemon-reload", Do: func() error { return run("systemctl", "daemon-reload") }},
 			Step{ID: "enable", Do: func() error { return run("systemctl", "enable", "--now", "contro1-broker.service") },
 				Undo: func() error { return run("systemctl", "disable", "--now", "contro1-broker.service") }},
+			// enable --now leaves an already running service on the OLD binary after
+			// an upgrade replaced it; restart starts it on the new one either way.
+			Step{ID: "restart", Do: func() error { return run("systemctl", "restart", "contro1-broker.service") }},
 		)
 	}
 	return steps, nil
