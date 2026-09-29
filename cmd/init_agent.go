@@ -11,6 +11,7 @@ import (
 var (
 	initAgentName      string
 	initAgentFramework string
+	initAgentParent    string
 )
 
 func init() {
@@ -22,6 +23,7 @@ func init() {
 	}
 	cmd.Flags().StringVar(&initAgentName, "name", "", "agent name (required)")
 	cmd.Flags().StringVar(&initAgentFramework, "framework", "coding-agent", "agent framework/type")
+	cmd.Flags().StringVar(&initAgentParent, "parent", "", "agent id this one belongs to, when it is a separate program another agent starts (it gets its own permissions)")
 	_ = cmd.MarkFlagRequired("name")
 	rootCmd.AddCommand(cmd)
 }
@@ -46,10 +48,14 @@ func runInitAgent(_ *cobra.Command, _ []string) error {
 		return output.Errf(output.CodeInsufficient, "contro1 init requires an agent profile; run 'contro1 auth login --mode agent'")
 	}
 
-	resp, err := c.Do("POST", "/api/centcom/v1/agents/register", map[string]any{
+	body := map[string]any{
 		"name":      strings.TrimSpace(initAgentName),
 		"framework": strings.TrimSpace(initAgentFramework),
-	})
+	}
+	if parent := strings.TrimSpace(initAgentParent); parent != "" {
+		body["parent_agent_id"] = parent
+	}
+	resp, err := c.Do("POST", "/api/centcom/v1/agents/register", body)
 	if err != nil {
 		return err
 	}

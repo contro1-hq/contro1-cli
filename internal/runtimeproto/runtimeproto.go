@@ -184,6 +184,9 @@ var approvalsOnlyRoutes = []DataRoute{
 	// card. The API rejects bearer leases and enforces one-time consumption.
 	{"POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease"},
 	{"POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease/release"},
+	// Renewal only extends a lease that is still live; the API refuses a
+	// bearer and a lapsed lease alike.
+	{"POST", "/api/centcom/v1/runtime/nanoclaw/mcp-lease/renew"},
 	{"POST", "/api/centcom/v1/requests"},
 	{"POST", "/api/centcom/v1/requests/control-map"},
 	{"GET", "/api/centcom/v1/requests"},

@@ -198,9 +198,11 @@ func init() {
 				if err != nil {
 					return output.Errf(output.CodeNetwork, "%v", err)
 				}
-				if err := installOnecliLease(ctx, conn, mcpURL(), lease, runOnecliCommand); err != nil {
+				if err := installOnecliLease(ctx, conn, mcpURL(), lease.Lease, runOnecliCommand); err != nil {
 					return output.Errf(output.CodeNetwork, "could not grant the Contro1 credential to this NanoClaw agent in OneCLI: %v", err)
 				}
+				expires, _ := time.Parse(time.RFC3339, lease.ExpiresAt)
+				afterNanoLeaseInstalled(ctx, nanoLease{Subject: conn.PlatformSubject, LeaseID: lease.LeaseID, ExpiresAt: expires, Endpoint: conn.Endpoint}, prompt.Progress)
 			}
 
 			journal := &platforms.Journal{}
@@ -251,8 +253,9 @@ func init() {
 				return output.Errf(output.CodeNetwork, "Contro1 refused the NanoClaw MCP claim (HTTP %d)", resp.StatusCode)
 			}
 			var claimed struct {
-				Lease   string `json:"lease"`
-				LeaseID string `json:"lease_id"`
+				Lease     string `json:"lease"`
+				LeaseID   string `json:"lease_id"`
+				ExpiresAt string `json:"expires_at"`
 			}
 			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&claimed); err != nil || claimed.Lease == "" {
 				return output.Errf(output.CodeNetwork, "Contro1 returned an unreadable MCP claim")
@@ -271,10 +274,71 @@ func init() {
 				}
 				return output.Errf(output.CodeNetwork, "could not grant Contro1 MCP to this NanoClaw agent in OneCLI: %v", err)
 			}
+			expires, _ := time.Parse(time.RFC3339, claimed.ExpiresAt)
+			afterNanoLeaseInstalled(cmd.Context(),
+				nanoLease{Subject: args[1], LeaseID: claimed.LeaseID, ExpiresAt: expires, Endpoint: endpoint},
+				func(line string) { fmt.Fprintln(os.Stderr, line) })
 			return nil
 		},
 	}
 	appsCmd.AddCommand(claim)
+
+	var renewAgent string
+	var renewForce, renewQuiet bool
+	renew := &cobra.Command{
+		Use:   "renew-nanoclaw",
+		Short: "Renew the Contro1 credential OneCLI holds for NanoClaw agents, before it expires",
+		Long: "Runs on a schedule that `apps enable nanoclaw` installs. Renews each recorded lease a week " +
+			"before it expires and hands the new one to OneCLI. A lease that already expired needs its owner " +
+			"to approve the connection again.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			path, err := nanoLeasePath()
+			if err != nil {
+				return output.Errf(output.CodeNetwork, "%v", err)
+			}
+			state, err := loadNanoLeases(path)
+			if err != nil {
+				return output.Errf(output.CodeNetwork, "%v", err)
+			}
+			say := func(line string) {
+				if !renewQuiet {
+					fmt.Println(line)
+				}
+			}
+			if len(state.Leases) == 0 {
+				say("No NanoClaw credential is recorded on this computer. Set one up with: contro1 apps enable nanoclaw")
+				return nil
+			}
+			if _, err := exec.LookPath("onecli"); err != nil {
+				return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host")
+			}
+			now := time.Now()
+			var failures []string
+			for _, lease := range state.Leases {
+				if renewAgent != "" && lease.Subject != renewAgent {
+					continue
+				}
+				if !renewForce && !renewDue(lease, now) {
+					say(fmt.Sprintf("%s: valid until %s, nothing to do.", lease.Subject, lease.ExpiresAt.Format("2006-01-02")))
+					continue
+				}
+				renewed, err := renewNanoLease(cmd.Context(), lease, runOnecliCommand)
+				if err != nil {
+					failures = append(failures, lease.Subject+": "+err.Error())
+					continue
+				}
+				say(fmt.Sprintf("%s: renewed, valid until %s.", renewed.Subject, renewed.ExpiresAt.Format("2006-01-02")))
+			}
+			if len(failures) > 0 {
+				return output.Errf(output.CodeNetwork, "%s", strings.Join(failures, "; "))
+			}
+			return nil
+		},
+	}
+	renew.Flags().StringVar(&renewAgent, "agent", "", "only this NanoClaw agent group")
+	renew.Flags().BoolVar(&renewForce, "force", false, "renew now even if the credential is not close to expiring")
+	renew.Flags().BoolVar(&renewQuiet, "quiet", false, "print nothing unless something fails")
+	appsCmd.AddCommand(renew)
 	rootCmd.AddCommand(appsCmd)
 }
 
@@ -383,22 +447,25 @@ issueAgentLease asks Contro1 for a bounded credential for this agent.
 Only its accountable owner may ask, which the server enforces: whoever set up a
 computer is not whoever answers for what the agent then reads.
 */
-func issueAgentLease(conn platforms.LocalConnection) (string, error) {
+func issueAgentLease(conn platforms.LocalConnection) (renewedLease, error) {
 	c, _, err := newClient()
 	if err != nil {
-		return "", err
+		return renewedLease{}, err
 	}
 	resp, err := c.Do("POST",
 		"/api/centcom/v1/runtime/connections/enrollments/"+url.PathEscape(conn.EnrollmentID)+"/lease",
 		map[string]any{})
 	if err != nil {
-		return "", fmt.Errorf("Contro1 would not issue a credential for this agent: %w", err)
+		return renewedLease{}, fmt.Errorf("Contro1 would not issue a credential for this agent: %w", err)
 	}
-	lease, _ := resp["lease"].(string)
-	if lease == "" {
-		return "", errors.New("Contro1 did not return a credential")
+	var issued renewedLease
+	issued.Lease, _ = resp["lease"].(string)
+	issued.LeaseID, _ = resp["lease_id"].(string)
+	issued.ExpiresAt, _ = resp["expires_at"].(string)
+	if issued.Lease == "" {
+		return renewedLease{}, errors.New("Contro1 did not return a credential")
 	}
-	return lease, nil
+	return issued, nil
 }
 
 type onecliRunner func(context.Context, ...string) ([]byte, error)
@@ -472,5 +539,35 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 		_, _ = run(ctx, "secrets", "delete", "--id", created.ID)
 		return errors.New("OneCLI would not grant the credential to this agent")
 	}
+	removeStaleOnecliLeases(ctx, conn.PlatformSubject, u.Hostname(), u.Path, created.ID, run)
 	return nil
+}
+
+// removeStaleOnecliLeases deletes earlier Contro1 credentials for the same
+// agent and endpoint. Left in place, OneCLI would hold two secrets for one
+// route and could keep injecting the expired one, which is the failure a
+// renewal exists to prevent. Best effort: the new secret is already granted.
+func removeStaleOnecliLeases(ctx context.Context, subject, host, path, keepID string, run onecliRunner) {
+	raw, err := run(ctx, "secrets", "list", "--max", "0")
+	if err != nil {
+		return
+	}
+	var secrets []struct {
+		ID          string  `json:"id"`
+		Name        string  `json:"name"`
+		HostPattern string  `json:"hostPattern"`
+		PathPattern *string `json:"pathPattern"`
+	}
+	if json.Unmarshal(raw, &secrets) != nil {
+		return
+	}
+	for _, s := range secrets {
+		if s.ID == keepID || s.Name != "Contro1 "+subject || s.HostPattern != host {
+			continue
+		}
+		if s.PathPattern == nil || *s.PathPattern != path {
+			continue
+		}
+		_, _ = run(ctx, "secrets", "delete", "--id", s.ID)
+	}
 }

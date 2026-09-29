@@ -17,7 +17,10 @@ import (
 const maxDataBody = 1 << 20
 
 // forwardedRequestHeaders are the only caller headers passed upstream.
-var forwardedRequestHeaders = []string{"Content-Type", "Accept", "Idempotency-Key", "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id"}
+// Contro1-Sub-Agent names a part of THIS endpoint's agent. Forwarding it cannot
+// widen anything: the server resolves the part under the credential's own
+// agent, so a name can only ever select a part of the agent the broker speaks for.
+var forwardedRequestHeaders = []string{"Content-Type", "Accept", "Idempotency-Key", "Mcp-Session-Id", "Mcp-Protocol-Version", "Last-Event-Id", "Contro1-Sub-Agent"}
 
 // hopHeaders are never copied back to the caller.
 var hopHeaders = map[string]bool{"Connection": true, "Keep-Alive": true, "Transfer-Encoding": true, "Upgrade": true, "Set-Cookie": true, "Dpop-Nonce": true, "Www-Authenticate": true}

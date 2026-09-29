@@ -123,13 +123,15 @@ func TestOnecliLeaseGrantedOnlyToMatchingNanoAgent(t *testing.T) {
 			return []byte(`{"id":"secret-1"}`), nil
 		case "agents grants":
 			return []byte(`{"status":"attached"}`), nil
+		case "secrets list":
+			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected OneCLI command")
 	}
 	if err := installOnecliLease(context.Background(), conn, "https://api.contro1.com/api/centcom/mcp", lease, run); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 3 || strings.Join(calls[2], " ") != "agents grants attach-secret --id onecli-agent-1 --secret-id secret-1" {
+	if len(calls) != 4 || strings.Join(calls[2], " ") != "agents grants attach-secret --id onecli-agent-1 --secret-id secret-1" {
 		t.Fatalf("secret was not granted to exactly the matching agent: %v", calls)
 	}
 	created := strings.Join(calls[1], " ")
@@ -174,5 +176,38 @@ func TestOnecliLeaseGrantFailureDeletesVaultSecret(t *testing.T) {
 		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run)
 	if err == nil || len(commands) != 4 || commands[3] != "secrets delete --id secret-1" {
 		t.Fatalf("orphaned vault secret after failed grant: %v, commands=%v", err, commands)
+	}
+}
+
+func TestOnecliLeaseRemovesOnlyStaleSecretsForSameAgentAndRoute(t *testing.T) {
+	var deleted []string
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] + " " + args[1] {
+		case "agents list":
+			return []byte(`[{"id":"onecli-agent-1","identifier":"nano-group-1"}]`), nil
+		case "secrets create":
+			return []byte(`{"id":"secret-new"}`), nil
+		case "agents grants":
+			return []byte(`{"status":"attached"}`), nil
+		case "secrets list":
+			return []byte(`[
+				{"id":"secret-new","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"},
+				{"id":"secret-old","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"},
+				{"id":"other-group","name":"Contro1 nano-group-2","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"},
+				{"id":"other-route","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/other"},
+				{"id":"anthropic","name":"Anthropic","hostPattern":"api.anthropic.com","pathPattern":null}
+			]`), nil
+		case "secrets delete":
+			deleted = append(deleted, args[3])
+			return []byte(`{"status":"deleted"}`), nil
+		}
+		return nil, errors.New("unexpected command")
+	}
+	if err := installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
+		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(deleted, ",") != "secret-old" {
+		t.Fatalf("expected only the stale secret for this agent and route to be removed, got %v", deleted)
 	}
 }

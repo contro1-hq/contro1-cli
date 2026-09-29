@@ -161,6 +161,22 @@ contro1 traces for-request <request_id>
 
 # Ask for human input (a free_text request)
 contro1 ask "Which customer segment should I use?" --wait
+
+# Register a separate program under the agent that starts it (it inherits nothing)
+contro1 init --name "Invoice worker" --framework langgraph --parent agt_123
+```
+
+### Report every Claude Code tool call
+
+`contro1 activity hook` is a Claude Code hook: it reports each tool call to Contro1 from outside the model, one session per trace. With `--fail-closed`, a tool whose start could not be recorded is blocked (exit code 2).
+
+```json
+{
+  "hooks": {
+    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook --fail-closed" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook" }] }]
+  }
+}
 ```
 
 ## Routing, Control Map and quorum

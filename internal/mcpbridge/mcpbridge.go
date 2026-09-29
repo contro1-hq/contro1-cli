@@ -280,9 +280,23 @@ func Serve(apiURL, profile string, input io.Reader, output io.Writer) error {
 // Credential persistence remains outside the wire protocol; the local adapter
 // forwards the remote server's JSON-RPC response without interpreting tools,
 // grants or authorization results.
+// withoutBOM drops a UTF-8 byte-order mark at the very start of the stream.
+//
+// A Windows shell whose output encoding is UTF-8 writes one before the first
+// line it pipes in, and the server then refused that line as invalid JSON - so
+// the first request of the session, initialize, failed for reasons the person
+// could not see. JSON-RPC over stdio never starts with one on purpose.
+func withoutBOM(input io.Reader) io.Reader {
+	reader := bufio.NewReader(input)
+	if head, err := reader.Peek(3); err == nil && bytes.Equal(head, []byte{0xEF, 0xBB, 0xBF}) {
+		_, _ = reader.Discard(3)
+	}
+	return reader
+}
+
 func serveWithCredentials(apiURL, profile string, credentials *Credentials, input io.Reader, output io.Writer) error {
 	endpoint := strings.TrimRight(apiURL, "/") + "/api/centcom/mcp"
-	scanner := bufio.NewScanner(input)
+	scanner := bufio.NewScanner(withoutBOM(input))
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	var writes sync.Mutex
 	var credentialAccess sync.Mutex
@@ -401,7 +415,7 @@ func first(values ...string) string {
 // holds none and cannot choose an identity.
 func ServeViaEndpoint(client *http.Client, baseURL string, input io.Reader, output io.Writer) error {
 	endpoint := strings.TrimRight(baseURL, "/") + "/mcp"
-	scanner := bufio.NewScanner(input)
+	scanner := bufio.NewScanner(withoutBOM(input))
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	var writes sync.Mutex
 	var workers sync.WaitGroup
