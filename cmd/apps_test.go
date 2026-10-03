@@ -211,3 +211,55 @@ func TestOnecliLeaseRemovesOnlyStaleSecretsForSameAgentAndRoute(t *testing.T) {
 		t.Fatalf("expected only the stale secret for this agent and route to be removed, got %v", deleted)
 	}
 }
+
+// OneCLI 2.2.5 wraps every result as {"hint": ..., "data": ...}. Every read in
+// the lease flow must accept it, including the created secret, which would
+// otherwise decode as an object with no id.
+func TestOnecliLeaseAcceptsHintDataEnvelope(t *testing.T) {
+	var commands []string
+	run := func(_ context.Context, args ...string) ([]byte, error) {
+		commands = append(commands, strings.Join(args, " "))
+		switch args[0] + " " + args[1] {
+		case "agents list":
+			return []byte(`{"hint":"Showing 1 agent","data":[{"id":"onecli-agent-1","identifier":"nano-group-1"}]}`), nil
+		case "secrets create":
+			return []byte(`{"hint":"Secret created","data":{"id":"secret-new"}}`), nil
+		case "agents grants":
+			return []byte(`{"hint":"Attached","data":{"status":"attached"}}`), nil
+		case "secrets list":
+			return []byte(`{"hint":"Showing 2 secrets","data":[
+				{"id":"secret-new","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"},
+				{"id":"secret-old","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"}
+			]}`), nil
+		case "secrets delete":
+			return []byte(`{"hint":"Deleted","data":{"status":"deleted"}}`), nil
+		}
+		return nil, errors.New("unexpected command")
+	}
+	if err := installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
+		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"agents grants attach-secret --id onecli-agent-1 --secret-id secret-new",
+		"secrets delete --id secret-old",
+	}
+	for _, w := range want {
+		found := false
+		for _, c := range commands {
+			found = found || c == w
+		}
+		if !found {
+			t.Fatalf("missing %q in %v", w, commands)
+		}
+	}
+}
+
+func TestDecodeOnecliJSONKeepsBareObjectWithOwnDataField(t *testing.T) {
+	var v struct {
+		Data string `json:"data"`
+	}
+	if err := decodeOnecliJSON([]byte(`{"data":"kept"}`), &v); err != nil || v.Data != "kept" {
+		t.Fatalf("object without hint must not be unwrapped: %v %q", err, v.Data)
+	}
+}

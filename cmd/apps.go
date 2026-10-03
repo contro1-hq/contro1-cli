@@ -477,6 +477,22 @@ func runOnecliCommand(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "onecli", args...).Output()
 }
 
+// decodeOnecliJSON reads OneCLI output in either shape it has shipped: the bare
+// value, or since 2.2.5 an envelope {"hint": "...", "data": <value>}. Only an
+// object carrying both keys is unwrapped. An object result such as a created
+// secret decodes without error either way, so falling back on failure alone
+// would read the envelope as a secret with no id.
+func decodeOnecliJSON(raw []byte, v any) error {
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(raw, &envelope) == nil {
+		data, hasData := envelope["data"]
+		if _, hasHint := envelope["hint"]; hasHint && hasData {
+			raw = data
+		}
+	}
+	return json.Unmarshal(raw, v)
+}
+
 // installOnecliLease keeps the runtime credential in the host vault and grants
 // it only to NanoClaw's OneCLI identity (the NanoClaw agent group id). A
 // hostname-wide secret without this explicit grant would let another group
@@ -494,7 +510,7 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 		ID         string `json:"id"`
 		Identifier string `json:"identifier"`
 	}
-	if err := json.Unmarshal(agentsRaw, &agents); err != nil {
+	if err := decodeOnecliJSON(agentsRaw, &agents); err != nil {
 		return errors.New("OneCLI returned an unreadable agent list")
 	}
 	var onecliAgentID string
@@ -532,7 +548,7 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 	var created struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(createdRaw, &created); err != nil || created.ID == "" {
+	if err := decodeOnecliJSON(createdRaw, &created); err != nil || created.ID == "" {
 		return errors.New("OneCLI created a credential but did not return its id; inspect the OneCLI vault before retrying")
 	}
 	if _, err := run(ctx, "agents", "grants", "attach-secret", "--id", onecliAgentID, "--secret-id", created.ID); err != nil {
@@ -558,7 +574,7 @@ func removeStaleOnecliLeases(ctx context.Context, subject, host, path, keepID st
 		HostPattern string  `json:"hostPattern"`
 		PathPattern *string `json:"pathPattern"`
 	}
-	if json.Unmarshal(raw, &secrets) != nil {
+	if decodeOnecliJSON(raw, &secrets) != nil {
 		return
 	}
 	for _, s := range secrets {
