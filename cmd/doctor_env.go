@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -234,6 +236,22 @@ Three separate facts, because each can be true without the others and each
 produces a different, silent failure: the channel can be absent, present but
 without an approver account, or have one that holds no role in this group.
 */
+// LeaseExposure asks OneCLI, the gateway that holds a NanoClaw agent's Contro1
+// MCP lease, whether the lease is stored and who else receives it.
+func (e *systemDoctorEnv) LeaseExposure(ctx context.Context, platform, subject string) (bool, []string, error) {
+	if platform != "nanoclaw" {
+		return false, nil, errors.New("not reported by this platform")
+	}
+	if _, err := exec.LookPath("onecli"); err != nil {
+		return false, nil, err
+	}
+	u, err := url.Parse(mcpURL())
+	if err != nil || u.Hostname() == "" {
+		return false, nil, errors.New("no Contro1 MCP address")
+	}
+	return onecliLeaseExposure(ctx, subject, u.Hostname(), u.Path, runOnecliCommand)
+}
+
 func (e *systemDoctorEnv) ApproverStatus(ctx context.Context, platform, subject string) (doctor.ApproverStatus, error) {
 	var out doctor.ApproverStatus
 	if platform != "nanoclaw" {

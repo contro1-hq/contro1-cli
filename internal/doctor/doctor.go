@@ -54,6 +54,10 @@ type Env interface {
 	// ApproverStatus reports whether the Contro1 channel is actually loaded in
 	// the platform and whether it may resolve this subject's approvals.
 	ApproverStatus(ctx context.Context, platform, subject string) (ApproverStatus, error)
+	// LeaseExposure reports whether this subject's Contro1 MCP lease is held
+	// by the platform's credential gateway, and which other agents receive it
+	// too. An error means the gateway could not say, which is not a finding.
+	LeaseExposure(ctx context.Context, platform, subject string) (stored bool, exposedTo []string, err error)
 	Development() bool
 }
 
@@ -179,6 +183,7 @@ func Run(ctx context.Context, env Env, platform string) Report {
 		for _, e := range mapping.Entries {
 			addApproverChecks(ctx, &r, env, platform, e)
 			addApplicationChecks(ctx, &r, env, platform, e)
+			addLeaseExposureChecks(ctx, &r, env, e)
 		}
 	}
 
@@ -372,6 +377,35 @@ func addApplicationChecks(ctx context.Context, r *Report, env Env, platform stri
 		return
 	}
 	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Set up, pointed at this agent's own connection."})
+}
+
+/*
+Does anyone besides this agent receive its Contro1 credential?
+
+OneCLI 2.2.5 hands every secret in the vault to an agent in "all" mode, and a
+new agent starts that way. `apps enable` and `apps renew` refuse while another
+agent is in "all" mode, but a group created after the lease was stored would
+receive it until the next renewal, and could act as this agent at Contro1.
+Reported only when a lease is actually stored: without one there is nothing to
+receive.
+*/
+func addLeaseExposureChecks(ctx context.Context, r *Report, env Env, e runtimeproto.MappingEntry) {
+	stored, exposed, err := env.LeaseExposure(ctx, r.Platform, e.PlatformSubject)
+	if err != nil || !stored {
+		return
+	}
+	id := "lease_only_this_agent:" + e.PlatformSubject
+	label := "Only " + e.PlatformSubject + " receives its Contro1 credential"
+	if len(exposed) == 0 {
+		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "No other agent receives it."})
+		return
+	}
+	add(r, runtimeproto.Check{
+		ID: id, Label: label, Status: runtimeproto.CheckBlocked, Actor: "you",
+		Message: "OneCLI gives every secret to agents in \"all\" mode, so " + strings.Join(exposed, ", ") +
+			" also receive this agent's Contro1 credential and could act as it.",
+		NextCommand: "onecli agents set-secrets --id <id> --secret-ids <the secrets it needs>, then onecli agents set-secret-mode --id <id> --mode selective",
+	})
 }
 
 /*

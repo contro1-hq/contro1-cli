@@ -621,6 +621,42 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 	return nil
 }
 
+// onecliLeaseExposure answers, after the fact, the question installOnecliLease
+// asks before it creates anything: is this agent's Contro1 lease in the vault,
+// and which other agents receive it because they are in "all" mode. A group
+// created after the lease was stored starts in "all" mode and nothing else
+// would notice until the next renewal refuses. Older OneCLI has no modes and
+// grants one agent at a time, so there is nothing to report.
+func onecliLeaseExposure(ctx context.Context, subject, host, path string, run onecliRunner) (stored bool, exposed []string, err error) {
+	agentsRaw, err := run(ctx, "agents", "list", "--max", "0")
+	if err != nil {
+		return false, nil, errors.New("could not list OneCLI agents")
+	}
+	var agents []onecliAgent
+	if err := decodeOnecliJSON(agentsRaw, &agents); err != nil {
+		return false, nil, errors.New("OneCLI returned an unreadable agent list")
+	}
+	var me *onecliAgent
+	for i := range agents {
+		if agents[i].Identifier == subject {
+			me = &agents[i]
+		}
+	}
+	if me == nil || me.SecretMode == "" {
+		return false, nil, nil
+	}
+	stored = len(staleOnecliLeases(ctx, subject, host, path, "", run)) > 0
+	if !stored {
+		return false, nil, nil
+	}
+	for _, a := range agents {
+		if a.ID != me.ID && a.SecretMode == "all" {
+			exposed = append(exposed, onecliAgentLabel(a))
+		}
+	}
+	return true, exposed, nil
+}
+
 func onecliAgentLabel(a onecliAgent) string {
 	if a.Name != "" {
 		return fmt.Sprintf("%q (%s)", a.Name, a.ID)

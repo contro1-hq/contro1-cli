@@ -376,3 +376,24 @@ func TestOnecliSelectiveUnreadableListCreatesNothing(t *testing.T) {
 		}
 	}
 }
+
+func TestOnecliLeaseExposureNamesAgentsInAllMode(t *testing.T) {
+	var commands []string
+	run := fakeOnecli225(`[
+		{"id":"uuid-nano","name":"Nano","identifier":"nano-group-1","accessToken":"aoc_a","secretMode":"all"},
+		{"id":"uuid-new","name":"NewGroup","identifier":"other-group","accessToken":"aoc_b","secretMode":"all"},
+		{"id":"uuid-sel","name":"Careful","identifier":"third-group","secretMode":"selective"}
+	]`, `[]`, &commands)
+	stored, exposed, err := onecliLeaseExposure(context.Background(), "nano-group-1", "api.contro1.com", "/api/centcom/mcp", run)
+	if err != nil || !stored {
+		t.Fatalf("lease is stored: %v %v", stored, err)
+	}
+	if len(exposed) != 1 || exposed[0] != `"NewGroup" (uuid-new)` {
+		t.Fatalf("only the other all-mode agent is exposed: %v", exposed)
+	}
+	for _, c := range commands {
+		if !strings.HasPrefix(c, "agents list") && !strings.HasPrefix(c, "secrets list") {
+			t.Fatalf("doctor must only read: %v", commands)
+		}
+	}
+}

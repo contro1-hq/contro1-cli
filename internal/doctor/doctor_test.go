@@ -29,6 +29,12 @@ type fakeEnv struct {
 	mcpErr                        error
 	mounts                        []string
 	liveMode                      string
+	leaseStored                   bool
+	leaseExposed                  []string
+}
+
+func (f *fakeEnv) LeaseExposure(context.Context, string, string) (bool, []string, error) {
+	return f.leaseStored, f.leaseExposed, nil
 }
 
 func (f *fakeEnv) McpServers(context.Context, string, string) ([]McpServerConfig, error) {
@@ -370,5 +376,35 @@ func TestTheModeReportedIsTheOneTheServerGives(t *testing.T) {
 	}
 	if strings.Contains(c.Message, "still says") {
 		t.Fatalf("nothing to disagree with, so nothing to report: %q", c.Message)
+	}
+}
+
+// A new OneCLI agent starts in "all" mode and receives every secret, including
+// another agent's Contro1 lease. Blocked, because that agent can act as this one.
+func TestLeaseReceivedByAnotherAgentIsBlocked(t *testing.T) {
+	env := healthy()
+	r := Run(context.Background(), env, "nanoclaw")
+	if _, ok := findCheck(r, "lease_only_this_agent:group-a"); ok {
+		t.Fatal("no stored lease means nothing to report")
+	}
+
+	env = healthy()
+	env.leaseStored = true
+	r = Run(context.Background(), env, "nanoclaw")
+	c, ok := findCheck(r, "lease_only_this_agent:group-a")
+	if !ok || c.Status != runtimeproto.CheckOK {
+		t.Fatalf("a lease only this agent receives must pass: %+v", c)
+	}
+
+	env = healthy()
+	env.leaseStored = true
+	env.leaseExposed = []string{`"GroupHelper" (uuid-1)`}
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "lease_only_this_agent:group-a")
+	if c.Status != runtimeproto.CheckBlocked || !strings.Contains(c.Message, "GroupHelper") || !strings.Contains(c.NextCommand, "set-secret-mode") {
+		t.Fatalf("exposure must be blocked, name the agent and the fix: %+v", c)
+	}
+	if r.State != "blocked" {
+		t.Fatalf("report state: %s", r.State)
 	}
 }
