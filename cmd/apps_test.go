@@ -131,7 +131,7 @@ func TestOnecliLeaseGrantedOnlyToMatchingNanoAgent(t *testing.T) {
 	if err := installOnecliLease(context.Background(), conn, "https://api.contro1.com/api/centcom/mcp", lease, run); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 4 || strings.Join(calls[2], " ") != "agents grants attach-secret --id onecli-agent-1 --secret-id secret-1" {
+	if len(calls) != 4 || strings.Join(calls[3], " ") != "agents grants attach-secret --id onecli-agent-1 --secret-id secret-1" {
 		t.Fatalf("secret was not granted to exactly the matching agent: %v", calls)
 	}
 	created := strings.Join(calls[1], " ")
@@ -174,7 +174,7 @@ func TestOnecliLeaseGrantFailureDeletesVaultSecret(t *testing.T) {
 	}
 	err := installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
 		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run)
-	if err == nil || len(commands) != 4 || commands[3] != "secrets delete --id secret-1" {
+	if err == nil || len(commands) != 5 || commands[4] != "secrets delete --id secret-1" {
 		t.Fatalf("orphaned vault secret after failed grant: %v, commands=%v", err, commands)
 	}
 }
@@ -261,5 +261,118 @@ func TestDecodeOnecliJSONKeepsBareObjectWithOwnDataField(t *testing.T) {
 	}
 	if err := decodeOnecliJSON([]byte(`{"data":"kept"}`), &v); err != nil || v.Data != "kept" {
 		t.Fatalf("object without hint must not be unwrapped: %v %q", err, v.Data)
+	}
+}
+
+// fakeOnecli225 answers like OneCLI 2.2.5: every result wrapped, agents carry
+// a secretMode, and there is no `agents grants`.
+func fakeOnecli225(agentsJSON, assignedJSON string, commands *[]string) onecliRunner {
+	return func(_ context.Context, args ...string) ([]byte, error) {
+		*commands = append(*commands, strings.Join(args, " "))
+		switch args[0] + " " + args[1] {
+		case "agents list":
+			return []byte(`{"hint":"Manage your agents","data":` + agentsJSON + `}`), nil
+		case "agents secrets":
+			return []byte(`{"hint":"Secrets","data":` + assignedJSON + `}`), nil
+		case "agents set-secrets":
+			return []byte(`{"hint":"Updated","data":{"ok":true}}`), nil
+		case "secrets create":
+			return []byte(`{"hint":"Created","data":{"id":"secret-new"}}`), nil
+		case "secrets list":
+			return []byte(`{"hint":"Secrets","data":[
+				{"id":"secret-new","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"},
+				{"id":"secret-old","name":"Contro1 nano-group-1","hostPattern":"api.contro1.com","pathPattern":"/api/centcom/mcp"}
+			]}`), nil
+		case "secrets delete":
+			return []byte(`{"hint":"Deleted","data":{"ok":true}}`), nil
+		}
+		return nil, errors.New("unknown command")
+	}
+}
+
+func installFor225(run onecliRunner) error {
+	return installOnecliLease(context.Background(), platforms.LocalConnection{PlatformSubject: "nano-group-1"},
+		"https://api.contro1.com/api/centcom/mcp", "ccr_live_test", run)
+}
+
+// set-secrets replaces the agent's list, so the agent must keep every secret it
+// had, gain the new one, and lose only the Contro1 credential it replaces.
+func TestOnecliSelectiveKeepsOtherSecretsAndSwapsTheLease(t *testing.T) {
+	var commands []string
+	run := fakeOnecli225(
+		`[{"id":"uuid-nano","name":"Nano","identifier":"nano-group-1","accessToken":"aoc_x","secretMode":"selective"}]`,
+		`[{"id":"anthropic-key","name":"Anthropic"},{"id":"secret-old","name":"Contro1 nano-group-1"}]`, &commands)
+	if err := installFor225(run); err != nil {
+		t.Fatal(err)
+	}
+	want := "agents set-secrets --id uuid-nano --secret-ids secret-new,anthropic-key"
+	if !containsString(commands, want) {
+		t.Fatalf("missing %q in %v", want, commands)
+	}
+	if !containsString(commands, "secrets delete --id secret-old") {
+		t.Fatalf("stale lease not deleted: %v", commands)
+	}
+	for _, c := range commands {
+		if strings.HasPrefix(c, "agents grants") {
+			t.Fatalf("2.2.5 has no agents grants: %v", commands)
+		}
+	}
+}
+
+// In "all" mode another agent would receive this agent's identity, so nothing
+// is created and the error names that agent and the way out.
+func TestOnecliRefusesWhenAnotherAgentReceivesEverySecret(t *testing.T) {
+	var commands []string
+	run := fakeOnecli225(`[
+		{"id":"uuid-nano","name":"Nano","identifier":"nano-group-1","accessToken":"aoc_secret_token","secretMode":"all"},
+		{"id":"uuid-other","name":"Other","identifier":"other-group","accessToken":"aoc_other_token","secretMode":"all"}
+	]`, `[]`, &commands)
+	err := installFor225(run)
+	if err == nil {
+		t.Fatal("must refuse while another agent is in all mode")
+	}
+	if len(commands) != 1 {
+		t.Fatalf("nothing may be created before the refusal: %v", commands)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"Other" (uuid-other)`) || !strings.Contains(msg, "set-secret-mode") {
+		t.Fatalf("refusal must name the agent and the fix: %s", msg)
+	}
+	if strings.Contains(msg, "aoc_") {
+		t.Fatalf("an agent access token leaked into the error: %s", msg)
+	}
+}
+
+// Alone in "all" mode, the agent already receives the new secret; the list is
+// not rewritten, which would silently switch what it receives.
+func TestOnecliAllModeAloneNeedsNoAssignment(t *testing.T) {
+	var commands []string
+	run := fakeOnecli225(`[
+		{"id":"uuid-nano","name":"Nano","identifier":"nano-group-1","secretMode":"all"},
+		{"id":"uuid-other","name":"Other","identifier":"other-group","secretMode":"selective"}
+	]`, `[]`, &commands)
+	if err := installFor225(run); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range commands {
+		if strings.HasPrefix(c, "agents set-secrets") || strings.HasPrefix(c, "agents grants") {
+			t.Fatalf("all mode must not rewrite assignments: %v", commands)
+		}
+	}
+	if !containsString(commands, "secrets delete --id secret-old") {
+		t.Fatalf("stale lease not deleted: %v", commands)
+	}
+}
+
+func TestOnecliSelectiveUnreadableListCreatesNothing(t *testing.T) {
+	var commands []string
+	run := fakeOnecli225(`[{"id":"uuid-nano","identifier":"nano-group-1","secretMode":"selective"}]`, `[{"name":"no id"}]`, &commands)
+	if err := installFor225(run); err == nil {
+		t.Fatal("an unreadable assignment list must stop before set-secrets could drop the agent's other secrets")
+	}
+	for _, c := range commands {
+		if strings.HasPrefix(c, "secrets create") {
+			t.Fatalf("created a secret it could not assign: %v", commands)
+		}
 	}
 }

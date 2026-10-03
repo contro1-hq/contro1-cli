@@ -493,10 +493,27 @@ func decodeOnecliJSON(raw []byte, v any) error {
 	return json.Unmarshal(raw, v)
 }
 
+// onecliAgent is one row of `onecli agents list`. That output also carries
+// each agent's gateway access token; it is decoded into this struct only and
+// never printed, logged or put in an error.
+type onecliAgent struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Identifier string `json:"identifier"`
+	SecretMode string `json:"secretMode"`
+}
+
 // installOnecliLease keeps the runtime credential in the host vault and grants
 // it only to NanoClaw's OneCLI identity (the NanoClaw agent group id). A
 // hostname-wide secret without this explicit grant would let another group
 // impersonate this agent at Contro1.
+//
+// OneCLI has shipped two ways to grant. Older releases attach one secret to one
+// agent (`agents grants attach-secret`). 2.2.5 gives each agent a secretMode:
+// "all" receives every secret in the vault, "selective" receives exactly the
+// list `agents set-secrets` last wrote. That command replaces the list, so it
+// is read first and written back whole. A row with no secretMode is the older
+// release.
 func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcpAddress, lease string, run onecliRunner) error {
 	u, err := url.Parse(mcpAddress)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Path != "/api/centcom/mcp" {
@@ -506,22 +523,46 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 	if err != nil {
 		return errors.New("could not list OneCLI agents")
 	}
-	var agents []struct {
-		ID         string `json:"id"`
-		Identifier string `json:"identifier"`
-	}
+	var agents []onecliAgent
 	if err := decodeOnecliJSON(agentsRaw, &agents); err != nil {
 		return errors.New("OneCLI returned an unreadable agent list")
 	}
-	var onecliAgentID string
-	for _, agent := range agents {
-		if agent.Identifier == conn.PlatformSubject {
-			onecliAgentID = agent.ID
+	var me *onecliAgent
+	for i := range agents {
+		if agents[i].Identifier == conn.PlatformSubject {
+			me = &agents[i]
 			break
 		}
 	}
-	if onecliAgentID == "" {
+	if me == nil || me.ID == "" {
 		return errors.New("this NanoClaw agent has no OneCLI identity yet; start it once with the OneCLI gateway enabled")
+	}
+	switch me.SecretMode {
+	case "", "all", "selective":
+	default:
+		return fmt.Errorf("OneCLI reports secret mode %q for this agent, which this contro1 does not know; update contro1", me.SecretMode)
+	}
+	if me.SecretMode != "" {
+		// Checked before anything is created: an agent in "all" mode would be
+		// handed this agent's identity the moment the secret exists.
+		var exposed []string
+		for _, a := range agents {
+			if a.ID != me.ID && a.SecretMode == "all" {
+				exposed = append(exposed, onecliAgentLabel(a))
+			}
+		}
+		if len(exposed) > 0 {
+			return fmt.Errorf("OneCLI gives every secret in the vault to agents in %q mode, so %s would also receive this agent's Contro1 credential and could act as it. "+
+				"For each of them run: onecli agents set-secrets --id <id> --secret-ids <the secrets it needs>, then onecli agents set-secret-mode --id <id> --mode selective. Then run this again",
+				"all", strings.Join(exposed, ", "))
+		}
+	}
+	var assigned []string
+	if me.SecretMode == "selective" {
+		assigned, err = onecliAgentSecretIDs(ctx, me.ID, run)
+		if err != nil {
+			return errors.New("OneCLI returned an unreadable secret list for this agent")
+		}
 	}
 	f, err := os.CreateTemp("", "contro1-onecli-secret-*")
 	if err != nil {
@@ -551,22 +592,93 @@ func installOnecliLease(ctx context.Context, conn platforms.LocalConnection, mcp
 	if err := decodeOnecliJSON(createdRaw, &created); err != nil || created.ID == "" {
 		return errors.New("OneCLI created a credential but did not return its id; inspect the OneCLI vault before retrying")
 	}
-	if _, err := run(ctx, "agents", "grants", "attach-secret", "--id", onecliAgentID, "--secret-id", created.ID); err != nil {
-		_, _ = run(ctx, "secrets", "delete", "--id", created.ID)
-		return errors.New("OneCLI would not grant the credential to this agent")
+	stale := staleOnecliLeases(ctx, conn.PlatformSubject, u.Hostname(), u.Path, created.ID, run)
+	switch me.SecretMode {
+	case "":
+		if _, err := run(ctx, "agents", "grants", "attach-secret", "--id", me.ID, "--secret-id", created.ID); err != nil {
+			_, _ = run(ctx, "secrets", "delete", "--id", created.ID)
+			return errors.New("OneCLI would not grant the credential to this agent")
+		}
+	case "selective":
+		// The agent keeps every secret it had, gains the new one, and loses
+		// only the Contro1 credentials the new one replaces.
+		next := []string{created.ID}
+		for _, id := range assigned {
+			if id != created.ID && !containsString(stale, id) {
+				next = append(next, id)
+			}
+		}
+		if _, err := run(ctx, "agents", "set-secrets", "--id", me.ID, "--secret-ids", strings.Join(next, ",")); err != nil {
+			_, _ = run(ctx, "secrets", "delete", "--id", created.ID)
+			return errors.New("OneCLI would not grant the credential to this agent")
+		}
 	}
-	removeStaleOnecliLeases(ctx, conn.PlatformSubject, u.Hostname(), u.Path, created.ID, run)
+	// In "all" mode the agent already receives every secret, and the check
+	// above made sure no other agent does.
+	for _, id := range stale {
+		_, _ = run(ctx, "secrets", "delete", "--id", id)
+	}
 	return nil
 }
 
-// removeStaleOnecliLeases deletes earlier Contro1 credentials for the same
-// agent and endpoint. Left in place, OneCLI would hold two secrets for one
-// route and could keep injecting the expired one, which is the failure a
-// renewal exists to prevent. Best effort: the new secret is already granted.
-func removeStaleOnecliLeases(ctx context.Context, subject, host, path, keepID string, run onecliRunner) {
+func onecliAgentLabel(a onecliAgent) string {
+	if a.Name != "" {
+		return fmt.Sprintf("%q (%s)", a.Name, a.ID)
+	}
+	return a.ID
+}
+
+// onecliAgentSecretIDs reads `onecli agents secrets`, accepting a list of ids
+// or a list of secret objects.
+func onecliAgentSecretIDs(ctx context.Context, agentID string, run onecliRunner) ([]string, error) {
+	raw, err := run(ctx, "agents", "secrets", "--id", agentID)
+	if err != nil {
+		return nil, err
+	}
+	var items []json.RawMessage
+	if err := decodeOnecliJSON(raw, &items); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		var id string
+		if json.Unmarshal(item, &id) == nil && id != "" {
+			ids = append(ids, id)
+			continue
+		}
+		var obj struct {
+			ID       string `json:"id"`
+			SecretID string `json:"secretId"`
+		}
+		if json.Unmarshal(item, &obj) != nil || (obj.ID == "" && obj.SecretID == "") {
+			return nil, errors.New("unrecognised secret entry")
+		}
+		if obj.SecretID != "" {
+			ids = append(ids, obj.SecretID)
+		} else {
+			ids = append(ids, obj.ID)
+		}
+	}
+	return ids, nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// staleOnecliLeases names earlier Contro1 credentials for the same agent and
+// endpoint. Left in place, OneCLI would hold two secrets for one route and
+// could keep injecting the expired one, which is the failure a renewal exists
+// to prevent. Best effort: an unreadable list removes nothing.
+func staleOnecliLeases(ctx context.Context, subject, host, path, keepID string, run onecliRunner) []string {
 	raw, err := run(ctx, "secrets", "list", "--max", "0")
 	if err != nil {
-		return
+		return nil
 	}
 	var secrets []struct {
 		ID          string  `json:"id"`
@@ -575,8 +687,9 @@ func removeStaleOnecliLeases(ctx context.Context, subject, host, path, keepID st
 		PathPattern *string `json:"pathPattern"`
 	}
 	if decodeOnecliJSON(raw, &secrets) != nil {
-		return
+		return nil
 	}
+	var stale []string
 	for _, s := range secrets {
 		if s.ID == keepID || s.Name != "Contro1 "+subject || s.HostPattern != host {
 			continue
@@ -584,6 +697,7 @@ func removeStaleOnecliLeases(ctx context.Context, subject, host, path, keepID st
 		if s.PathPattern == nil || *s.PathPattern != path {
 			continue
 		}
-		_, _ = run(ctx, "secrets", "delete", "--id", s.ID)
+		stale = append(stale, s.ID)
 	}
+	return stale
 }
