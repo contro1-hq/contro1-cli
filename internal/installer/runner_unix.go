@@ -54,8 +54,13 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 			ID:      "dir:" + d.Path,
 			Existed: func() (bool, error) { _, err := os.Stat(d.Path); return err == nil, nil },
 			Do: func() error {
-				owner := strings.SplitN(d.Owner, ":", 2)[0]
-				return run("install", "-d", "-o", owner, "-m", d.Mode, d.Path)
+				owner, group, hasGroup := strings.Cut(d.Owner, ":")
+				args := []string{"-d", "-o", owner}
+				if hasGroup {
+					args = append(args, "-g", group)
+				}
+				args = append(args, "-m", d.Mode, d.Path)
+				return run("install", args...)
 			},
 			Undo: func() error { return os.RemoveAll(d.Path) },
 		})
@@ -63,7 +68,7 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 	steps = append(steps, Step{
 		ID: "binary",
 		Do: func() error {
-			return run("install", "-D", "-o", "root", "-m", "0755", plan.Binary.Source, plan.Binary.Dest)
+			return run("install", binaryInstallArgs(runtime.GOOS, plan.Binary.Source, plan.Binary.Dest)...)
 		},
 		Undo: func() error { return os.Remove(plan.Binary.Dest) },
 	})

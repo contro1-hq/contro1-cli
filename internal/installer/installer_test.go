@@ -38,6 +38,15 @@ func TestPlans(t *testing.T) {
 	if !mac.Unverified || !strings.Contains(mac.Files[0].Content, "<string>_contro1broker</string>") {
 		t.Fatalf("macOS plan must be marked unverified and run as the service user")
 	}
+	if mac.Dirs[0].Path != "/usr/local/lib/contro1" || mac.Dirs[0].Owner != "root:wheel" || mac.Dirs[0].Mode != "0755" {
+		t.Fatalf("macOS must create the root-owned binary directory first: %+v", mac.Dirs[0])
+	}
+	if got := strings.Join(mac.Commands[2], " "); got != "install -d -o root -g wheel -m 0755 /usr/local/lib/contro1" {
+		t.Fatalf("macOS directory command: %s", got)
+	}
+	if got := strings.Join(mac.Commands[3], " "); got != "install -o root -g wheel -m 0755 /tmp/contro1 /usr/local/lib/contro1/contro1" {
+		t.Fatalf("macOS binary command: %s", got)
+	}
 
 	un := UninstallPlan("linux", false)
 	for _, c := range un.Commands {

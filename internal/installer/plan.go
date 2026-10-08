@@ -194,7 +194,7 @@ func planLinux(opts Options) InstallPlan {
 		Files:     []FileSpec{{Path: "/etc/systemd/system/contro1-broker.service", Mode: "0644", Content: unit}},
 		Commands: [][]string{
 			{"useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", brokerpaths.LinuxUser},
-			{"install", "-D", "-o", "root", "-g", "root", "-m", "0755", opts.SourceBinary, bin},
+			append([]string{"install"}, binaryInstallArgs("linux", opts.SourceBinary, bin)...),
 			{"install", "-d", "-o", brokerpaths.LinuxUser, "-g", "root", "-m", "0755", "/etc/contro1/platforms"},
 			{"systemctl", "daemon-reload"},
 			{"systemctl", "enable", "--now", "contro1-broker.service"},
@@ -246,6 +246,7 @@ func planDarwin(opts Options) InstallPlan {
 		Binary:     BinarySpec{Source: opts.SourceBinary, Dest: bin, SHA256: opts.SourceSHA256, Owner: "root:wheel", Mode: "0755"},
 		Users:      []UserSpec{{Name: brokerpaths.DarwinUser, Command: "dscl . -create /Users/" + brokerpaths.DarwinUser + " (UniqueID below 500, no login shell)"}},
 		Dirs: []DirSpec{
+			{Path: path.Dir(bin), Owner: "root:wheel", Mode: "0755"},
 			{Path: layout.StateDir, Owner: brokerpaths.DarwinUser, Mode: "0700"},
 			{Path: "/var/run/contro1", Owner: brokerpaths.DarwinUser, Mode: "0711"},
 			{Path: layout.PlatformsDir, Owner: brokerpaths.DarwinUser, Mode: "0755"},
@@ -256,7 +257,8 @@ func planDarwin(opts Options) InstallPlan {
 		Commands: [][]string{
 			{"dscl", ".", "-create", "/Users/" + brokerpaths.DarwinUser},
 			{"dscl", ".", "-create", "/Users/" + brokerpaths.DarwinUser, "UserShell", "/usr/bin/false"},
-			{"install", "-o", "root", "-g", "wheel", "-m", "0755", opts.SourceBinary, bin},
+			{"install", "-d", "-o", "root", "-g", "wheel", "-m", "0755", path.Dir(bin)},
+			append([]string{"install"}, binaryInstallArgs("darwin", opts.SourceBinary, bin)...),
 			{"launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.contro1.broker.plist"},
 		},
 		RequiresElevation: true,
@@ -302,6 +304,10 @@ func summary(p InstallPlan, elevation string) []string {
 		out = append(out, "Create the service account "+u.Name)
 	}
 	for _, d := range p.Dirs {
+		if p.OS == "darwin" && d.Path == path.Dir(p.Binary.Dest) {
+			out = append(out, "Create "+d.Path+" (readable by agent platforms, changed only by administrators)")
+			continue
+		}
 		if strings.Contains(d.SDDL, ";;;BU)") || d.Mode == "0755" || d.Mode == "0711" {
 			out = append(out, "Create "+d.Path+" (readable by agent platforms, changed only by the service)")
 			continue
@@ -322,6 +328,15 @@ func quoteArgs(bin string, args []string) string {
 		parts = append(parts, a)
 	}
 	return strings.Join(parts, " ")
+}
+
+// macOS install -D does not have GNU install's create-parent meaning. The
+// binary directory is created as its own step before this command runs.
+func binaryInstallArgs(goos, source, dest string) []string {
+	if goos == "darwin" {
+		return []string{"-o", "root", "-g", "wheel", "-m", "0755", source, dest}
+	}
+	return []string{"-D", "-o", "root", "-g", "root", "-m", "0755", source, dest}
 }
 
 func xmlEscape(s string) string {
