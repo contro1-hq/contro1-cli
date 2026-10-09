@@ -50,20 +50,35 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 	})
 	for _, d := range plan.Dirs {
 		d := d
+		installDir := func() error {
+			owner, group, hasGroup := strings.Cut(d.Owner, ":")
+			args := []string{"-d", "-o", owner}
+			if hasGroup {
+				args = append(args, "-g", group)
+			}
+			args = append(args, "-m", d.Mode, d.Path)
+			return run("install", args...)
+		}
 		steps = append(steps, Step{
 			ID:      "dir:" + d.Path,
 			Existed: func() (bool, error) { _, err := os.Stat(d.Path); return err == nil, nil },
-			Do: func() error {
-				owner, group, hasGroup := strings.Cut(d.Owner, ":")
-				args := []string{"-d", "-o", owner}
-				if hasGroup {
-					args = append(args, "-g", group)
-				}
-				args = append(args, "-m", d.Mode, d.Path)
-				return run("install", args...)
-			},
-			Undo: func() error { return os.RemoveAll(d.Path) },
+			Do:      installDir,
+			Undo:    func() error { return os.RemoveAll(d.Path) },
 		})
+		if runtime.GOOS == "darwin" {
+			// A previous install may have left this directory owned by root or
+			// inaccessible through a parent. Reconcile existing directories too;
+			// this step has no Undo so a failed repair never deletes old state.
+			steps = append(steps, Step{ID: "dir-access:" + d.Path, Do: func() error {
+				if err := installDir(); err != nil {
+					return err
+				}
+				if err := run("chown", d.Owner, d.Path); err != nil {
+					return err
+				}
+				return run("chmod", d.Mode, d.Path)
+			}})
+		}
 	}
 	steps = append(steps, Step{
 		ID: "binary",
@@ -85,7 +100,9 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 		})
 	}
 	if runtime.GOOS == "darwin" {
-		steps = append(steps, Step{ID: "launchd", Do: func() error {
+		steps = append(steps, Step{ID: "launchd", Existed: func() (bool, error) {
+			return exec.Command("launchctl", "print", "system/com.contro1.broker").Run() == nil, nil
+		}, Do: func() error {
 			return run("launchctl", "bootstrap", "system", "/Library/LaunchDaemons/com.contro1.broker.plist")
 		}, Undo: func() error { return run("launchctl", "bootout", "system/com.contro1.broker") }})
 		// An upgrade replaced the binary under a running daemon; -k restarts it on the new one.
@@ -185,8 +202,11 @@ func SudoHint(command string) string { return "sudo -v && " + command }
 // ServiceStatus is used by doctor.
 func ServiceStatus() (installed, running, automatic bool, account string) {
 	if runtime.GOOS == "darwin" {
-		err := exec.Command("launchctl", "print", "system/com.contro1.broker").Run()
-		return err == nil, err == nil, err == nil, brokerpaths.DarwinUser
+		loaded := exec.Command("launchctl", "print", "system/com.contro1.broker").Run() == nil
+		socket := strings.TrimPrefix(brokerpaths.Production("darwin").ControlEndpoint, "unix://")
+		info, err := os.Lstat(socket)
+		running := loaded && err == nil && info.Mode()&os.ModeSocket != 0
+		return loaded, running, loaded, brokerpaths.DarwinUser
 	}
 	installed = exec.Command("systemctl", "cat", "contro1-broker.service").Run() == nil
 	running = exec.Command("systemctl", "is-active", "--quiet", "contro1-broker.service").Run() == nil

@@ -247,6 +247,7 @@ func planDarwin(opts Options) InstallPlan {
 		Users:      []UserSpec{{Name: brokerpaths.DarwinUser, Command: "dscl . -create /Users/" + brokerpaths.DarwinUser + " (UniqueID below 500, no login shell)"}},
 		Dirs: []DirSpec{
 			{Path: path.Dir(bin), Owner: "root:wheel", Mode: "0755"},
+			{Path: path.Dir(layout.StateDir), Owner: "root:wheel", Mode: "0755"},
 			{Path: layout.StateDir, Owner: brokerpaths.DarwinUser, Mode: "0700"},
 			{Path: "/var/run/contro1", Owner: brokerpaths.DarwinUser, Mode: "0711"},
 			{Path: layout.PlatformsDir, Owner: brokerpaths.DarwinUser, Mode: "0755"},
@@ -304,7 +305,7 @@ func summary(p InstallPlan, elevation string) []string {
 		out = append(out, "Create the service account "+u.Name)
 	}
 	for _, d := range p.Dirs {
-		if p.OS == "darwin" && d.Path == path.Dir(p.Binary.Dest) {
+		if p.OS == "darwin" && d.Owner == "root:wheel" {
 			out = append(out, "Create "+d.Path+" (readable by agent platforms, changed only by administrators)")
 			continue
 		}

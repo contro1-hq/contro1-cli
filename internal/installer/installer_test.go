@@ -41,6 +41,12 @@ func TestPlans(t *testing.T) {
 	if mac.Dirs[0].Path != "/usr/local/lib/contro1" || mac.Dirs[0].Owner != "root:wheel" || mac.Dirs[0].Mode != "0755" {
 		t.Fatalf("macOS must create the root-owned binary directory first: %+v", mac.Dirs[0])
 	}
+	if mac.Dirs[1].Path != "/Library/Application Support/Contro1" || mac.Dirs[1].Owner != "root:wheel" || mac.Dirs[1].Mode != "0755" {
+		t.Fatalf("macOS broker must be able to traverse its state parent: %+v", mac.Dirs[1])
+	}
+	if mac.Dirs[2].Path != "/Library/Application Support/Contro1/broker" || mac.Dirs[2].Owner != brokerpaths.DarwinUser || mac.Dirs[2].Mode != "0700" {
+		t.Fatalf("macOS broker state must belong to the service account: %+v", mac.Dirs[2])
+	}
 	if got := strings.Join(mac.Commands[2], " "); got != "install -d -o root -g wheel -m 0755 /usr/local/lib/contro1" {
 		t.Fatalf("macOS directory command: %s", got)
 	}
