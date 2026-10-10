@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -155,8 +156,49 @@ func clientsFound(home, project string) map[string]string {
 
 // NanoClaw, OpenClaw and Hermes keep skills where their install, workspace or
 // config says. Each is found where its own docs put it.
+// searchOnlyHome keeps a test from searching the real drives of the machine.
+func searchOnlyHome(t *testing.T, extra ...string) {
+	t.Helper()
+	prev, prevWSL := nanoclawSearchBases, wslHomes
+	nanoclawSearchBases = func(home string, _ []string) []string { return append([]string{home}, extra...) }
+	wslHomes = func() []string { return nil }
+	t.Cleanup(func() { nanoclawSearchBases, wslHomes = prev, prevWSL })
+}
+
+func makeNanoClaw(t *testing.T, dir string) {
+	t.Helper()
+	writeSkill(t, filepath.Join(dir, "container", "skills", "agent-browser"))
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"nanoclaw"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Found from any folder: the daily schedule never runs inside the checkout.
+// Covers a checkout two levels down (C:\Projects\myNano) and one in another
+// base, as a WSL home is.
+func TestNanoClawFoundFromAnywhere(t *testing.T) {
+	home := t.TempDir()
+	wsl := t.TempDir()
+	searchOnlyHome(t, wsl)
+	makeNanoClaw(t, filepath.Join(home, "Projects", "myNano"))
+	makeNanoClaw(t, filepath.Join(wsl, "nanoclaw"))
+	if err := os.MkdirAll(filepath.Join(home, "elsewhere"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	roots := nanoclawRoots(home, filepath.Join(home, "elsewhere"), nil, nil)
+	if len(roots) != 2 {
+		t.Fatalf("found %d NanoClaw installs, want 2: %v", len(roots), roots)
+	}
+	for _, r := range roots {
+		if r.client != "nanoclaw" || r.scope != "user" {
+			t.Errorf("root %v: want client nanoclaw, scope user", r)
+		}
+	}
+}
+
 func TestRuntimeAgentSkillsFound(t *testing.T) {
 	home := t.TempDir()
+	searchOnlyHome(t)
 	t.Setenv("HERMES_HOME", "")
 	t.Setenv("OPENCLAW_STATE_DIR", "")
 
@@ -211,5 +253,45 @@ func TestHermesConfigDirs(t *testing.T) {
 	want := []string{"/opt/brain/skills", "~/a", "~/b"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// An agent installed inside WSL keeps its skills in the WSL home, which the
+// Windows CLI reads through \wsl.localhost. Every agent there is found, not
+// only NanoClaw.
+func TestAgentsInsideWSLFound(t *testing.T) {
+	home := t.TempDir()
+	wslHome := t.TempDir()
+	searchOnlyHome(t)
+	wslHomes = func() []string { return []string{wslHome} }
+	writeSkill(t, filepath.Join(wslHome, ".openclaw", "skills", "wsl-openclaw"))
+	writeSkill(t, filepath.Join(wslHome, ".hermes", "skills", "ops", "wsl-hermes"))
+	writeSkill(t, filepath.Join(wslHome, ".claude", "skills", "wsl-claude"))
+	got := clientsFound(home, "")
+	for name, client := range map[string]string{"wsl-openclaw": "openclaw", "wsl-hermes": "hermes", "wsl-claude": "claude-code"} {
+		if got[name] != client {
+			t.Errorf("%s: client %q, want %q (all: %v)", name, got[name], client, got)
+		}
+	}
+}
+
+// Cowork keeps the account's skills inside the Claude desktop app's folder.
+func TestCoworkSkillsFound(t *testing.T) {
+	home := t.TempDir()
+	searchOnlyHome(t)
+	var base string
+	switch runtime.GOOS {
+	case "windows":
+		base = filepath.Join(home, "AppData", "Roaming", "Claude")
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	case "darwin":
+		base = filepath.Join(home, "Library", "Application Support", "Claude")
+	default:
+		base = filepath.Join(home, ".config", "Claude")
+	}
+	writeSkill(t, filepath.Join(base, "local-agent-mode-sessions", "skills-plugin", "org", "user", "skills", "brand-deck"))
+	if got := clientsFound(home, "")["brand-deck"]; got != "cowork" {
+		t.Fatalf("client %q, want cowork", got)
 	}
 }

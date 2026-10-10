@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/config"
 	"github.com/spf13/cobra"
@@ -93,8 +97,11 @@ func expandHome(p, home string) string {
 // hermesRoots: Hermes Agent (Nous Research). Skills live in $HERMES_HOME/skills
 // (default ~/.hermes/skills), grouped by category one level deeper, plus
 // skills.create_dir and skills.external_dirs from its config.yaml.
-func hermesRoots(home string) []skillRoot {
-	base := os.Getenv("HERMES_HOME")
+func hermesRoots(home string, useEnv bool) []skillRoot {
+	base := ""
+	if useEnv {
+		base = os.Getenv("HERMES_HOME")
+	}
 	if base == "" {
 		base = filepath.Join(home, ".hermes")
 	}
@@ -186,8 +193,11 @@ var (
 // .agents/skills; and skills.load.extraDirs. Workspaces and extra folders come
 // from openclaw.json (JSON5, so read by pattern rather than a strict parser);
 // ~/.openclaw/workspace is the folder onboarding creates.
-func openclawRoots(home string) []skillRoot {
-	state := os.Getenv("OPENCLAW_STATE_DIR")
+func openclawRoots(home string, useEnv bool) []skillRoot {
+	state := ""
+	if useEnv {
+		state = os.Getenv("OPENCLAW_STATE_DIR")
+	}
 	if state == "" {
 		state = filepath.Join(home, ".openclaw")
 	}
@@ -225,34 +235,191 @@ func isNanoClawCheckout(dir string) bool {
 	return err == nil && strings.Contains(strings.ToLower(string(b)), "nanoclaw")
 }
 
-// nanoclawRoots finds NanoClaw checkouts: the project being reported, the
-// folders people usually clone into, and any folder added with
-// `contro1 skills folders add`.
-func nanoclawRoots(home, project string, folders []string) []skillRoot {
-	candidates := []string{project}
-	for _, parent := range []string{"", "code", "src", "dev", "projects", "repos", "git", "github", "Documents", "Desktop"} {
-		for _, name := range []string{"nanoclaw", "NanoClaw", "nanoclaw-pro"} {
-			candidates = append(candidates, filepath.Join(home, parent, name))
+// Folders never worth opening while looking for a NanoClaw checkout.
+var nanoclawSkipDirs = map[string]bool{
+	"node_modules": true, "AppData": true, "Windows": true, "Program Files": true, "Program Files (x86)": true,
+	"ProgramData": true, "$Recycle.Bin": true, "System Volume Information": true, "Library": true,
+	"Applications": true, "proc": true, "sys": true, "dev": true, "usr": true, "bin": true, "sbin": true,
+	"lib": true, "lib64": true, "etc": true, "var": true, "boot": true, "snap": true, "mnt": true,
+}
+
+// macOS asks the person before any program reads these, and a scheduled run
+// cannot ask at all. The automatic search leaves them alone; a NanoClaw kept in
+// one is added once with contro1 skills folders add.
+var macProtectedDirs = map[string]bool{
+	"Desktop": true, "Documents": true, "Downloads": true, "Pictures": true, "Movies": true, "Music": true,
+}
+
+// searchNanoClaw looks for checkouts up to two folders below each base
+// (C:\Projects\myNano, ~/code/nanoclaw), opening at most a few thousand
+// folders so a scheduled run stays quick.
+func searchNanoClaw(bases []string) []string {
+	var found []string
+	budget := 4000
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if budget <= 0 {
+				return
+			}
+			name := e.Name()
+			if !e.IsDir() || strings.HasPrefix(name, ".") || nanoclawSkipDirs[name] || (runtime.GOOS == "darwin" && macProtectedDirs[name]) {
+				continue
+			}
+			budget--
+			child := filepath.Join(dir, name)
+			if isNanoClawCheckout(child) {
+				found = append(found, child)
+				continue
+			}
+			if depth < 2 {
+				walk(child, depth+1)
+			}
 		}
 	}
+	for _, base := range bases {
+		walk(base, 1)
+	}
+	return found
+}
+
+// wslRunningDistros lists the WSL distributions running right now. Only
+// running ones: opening a stopped distro's files would start it, every four
+// hours, from the schedule. A NanoClaw service in WSL keeps its distro running.
+var wslRunningDistros = func() []string {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "wsl.exe", "-l", "--running", "-q").Output()
+	if err != nil {
+		return nil
+	}
+	// wsl.exe writes UTF-16; the names are ASCII, so dropping the zero bytes is enough.
+	var distros []string
+	for _, line := range strings.Split(strings.ReplaceAll(string(out), "\x00", ""), "\n") {
+		name := strings.TrimSpace(line)
+		if name != "" && !strings.HasPrefix(strings.ToLower(name), "docker-desktop") {
+			distros = append(distros, name)
+		}
+	}
+	return distros
+}
+
+// wslHomes: the home folders inside running WSL distributions, as Windows
+// sees them (\\wsl.localhost\Ubuntu\home\ariel). An agent installed in WSL
+// keeps its skills there, out of sight of the Windows home folder.
+var wslHomes = func() []string {
+	var homes []string
+	for _, distro := range wslRunningDistros() {
+		wslRoot := `\\wsl.localhost\` + distro
+		if users, err := os.ReadDir(filepath.Join(wslRoot, "home")); err == nil {
+			for _, u := range users {
+				if u.IsDir() {
+					homes = append(homes, filepath.Join(wslRoot, "home", u.Name()))
+				}
+			}
+		}
+	}
+	return homes
+}
+
+// nanoclawSearchBases: the home folder, every drive (Windows) or /opt and
+// /srv, and the WSL homes.
+var nanoclawSearchBases = func(home string, wsl []string) []string {
+	bases := []string{home}
+	if runtime.GOOS == "windows" {
+		for d := 'C'; d <= 'Z'; d++ {
+			if root := string(d) + `:\`; isDir(root) {
+				bases = append(bases, root)
+			}
+		}
+		bases = append(bases, wsl...)
+	} else {
+		bases = append(bases, "/opt", "/srv")
+	}
+	return bases
+}
+
+// nanoclawRoots finds NanoClaw checkouts wherever the report runs from: the
+// current project, a search of the usual places (home, drives, running WSL
+// distributions), and any folder added with `contro1 skills folders add`.
+//
+// Its skills are reported as "user", not "project": they belong to an
+// installed, running agent, so every report must include them whatever folder
+// it runs from. A "project" skill would vanish from a report run elsewhere.
+func nanoclawRoots(home, project string, folders, wsl []string) []skillRoot {
+	candidates := []string{project}
 	candidates = append(candidates, folders...)
+	candidates = append(candidates, searchNanoClaw(nanoclawSearchBases(home, wsl))...)
 	var roots []skillRoot
 	seen := map[string]bool{}
 	for _, dir := range candidates {
-		if dir == "" || seen[dir] || !isNanoClawCheckout(dir) {
+		if dir != "" {
+			dir = filepath.Clean(dir)
+		}
+		if dir == "" || seen[strings.ToLower(dir)] || !isNanoClawCheckout(dir) {
 			continue
 		}
-		seen[dir] = true
+		seen[strings.ToLower(dir)] = true
 		roots = append(roots, skillRoot{filepath.Join(dir, "container", "skills"), "nanoclaw", "user", false})
 	}
 	return roots
 }
 
-// detectRuntimeRoots: the agents whose skills are not in one fixed folder.
+// coworkRoots: Claude Cowork (the Claude desktop app). It keeps the account's
+// skills, Anthropic's and the ones a person added under Customize > Skills, in
+// local-agent-mode-sessions/skills-plugin/<id>/<id>/skills. The Microsoft
+// Store build keeps the same folder inside its package.
+func coworkRoots(home string) []skillRoot {
+	var bases []string
+	switch runtime.GOOS {
+	case "windows":
+		appdata := os.Getenv("APPDATA")
+		if appdata == "" {
+			appdata = filepath.Join(home, "AppData", "Roaming")
+		}
+		bases = append(bases, filepath.Join(appdata, "Claude"))
+		local := os.Getenv("LOCALAPPDATA")
+		if local == "" {
+			local = filepath.Join(home, "AppData", "Local")
+		}
+		if pkgs, err := filepath.Glob(filepath.Join(local, "Packages", "Claude_*", "LocalCache", "Roaming", "Claude")); err == nil {
+			bases = append(bases, pkgs...)
+		}
+	case "darwin":
+		bases = append(bases, filepath.Join(home, "Library", "Application Support", "Claude"))
+	default:
+		bases = append(bases, filepath.Join(home, ".config", "Claude"))
+	}
+	var roots []skillRoot
+	for _, base := range bases {
+		dirs, _ := filepath.Glob(filepath.Join(base, "local-agent-mode-sessions", "skills-plugin", "*", "*", "skills"))
+		for _, d := range dirs {
+			roots = append(roots, skillRoot{d, "cowork", "user", false})
+		}
+	}
+	return roots
+}
+
+// detectRuntimeRoots: the agents whose skills are not in one fixed folder,
+// and every agent installed inside a running WSL distribution.
 func detectRuntimeRoots(home, project string) []skillRoot {
 	folders := readSkillFolders()
-	roots := append(hermesRoots(home), openclawRoots(home)...)
-	roots = append(roots, nanoclawRoots(home, project, folders)...)
+	wsl := wslHomes()
+	roots := append(hermesRoots(home, true), openclawRoots(home, true)...)
+	roots = append(roots, coworkRoots(home)...)
+	for _, h := range wsl {
+		roots = append(roots, knownAgentRoots(h, "")...)
+		roots = append(roots, hermesRoots(h, false)...)
+		roots = append(roots, openclawRoots(h, false)...)
+	}
+	roots = append(roots, nanoclawRoots(home, project, folders, wsl)...)
 	// A folder added by hand that is not a NanoClaw checkout is a skills folder.
 	for _, dir := range folders {
 		if !isNanoClawCheckout(dir) {

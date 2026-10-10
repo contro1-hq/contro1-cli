@@ -55,9 +55,13 @@ Where it looks (each agent's documented folders; missing ones are skipped):
                 and skills.load.extraDirs from openclaw.json
   Hermes        ~/.hermes/skills (or $HERMES_HOME), plus create_dir and
                 external_dirs from its config.yaml
-  NanoClaw      container/skills of a NanoClaw install: the current project,
-                ~/nanoclaw and the usual clone folders, or one you add with
+  NanoClaw      container/skills of every NanoClaw install, found from any folder:
+                up to two folders below your home and each drive (Windows), in
+                running WSL distributions, or one you add with
                 contro1 skills folders add <folder>
+  Cowork        the skills of the Claude desktop app (Customize > Skills)
+  WSL           on Windows, every agent above installed inside a running WSL
+                distribution
   and each agent's project folder inside the current project.
 
 What it sends: each skill's files (SKILL.md and its supporting files), with the
