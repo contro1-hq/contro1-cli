@@ -127,7 +127,9 @@ func (o *openClaw) AllowedPrincipal(string) (string, error) {
 	return currentPrincipal(o.opts.Principal)
 }
 func (o *openClaw) SafeTest() string {
-	return `Try it: ask your assistant to run "sudo ls". Contro1 asks for approval first.`
+	// Not sudo: it prompts for a password the assistant cannot type, so even an
+	// approved test failed.
+	return `Try it: ask your assistant to run "touch ~/contro1-test.txt". Contro1 asks for approval first.`
 }
 
 // ---------------------------------------------------------------------------

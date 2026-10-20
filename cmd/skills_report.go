@@ -235,13 +235,29 @@ func frontmatterField(text, field string) string {
 		return ""
 	}
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
-	for _, line := range lines[1:] {
+	for i, line := range lines[1:] {
 		if strings.TrimSpace(line) == "---" {
 			break
 		}
-		if strings.HasPrefix(line, field+":") {
-			return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, field+":")), `"'`)
+		if !strings.HasPrefix(line, field+":") {
+			continue
 		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, field+":"))
+		// A block scalar (description: >- or |) continues on the indented
+		// lines below it; the marker itself is not the value.
+		if len(value) > 0 && (value[0] == '>' || value[0] == '|') && len(strings.Trim(value, ">|+-0123456789")) == 0 {
+			var parts []string
+			for _, next := range lines[i+2:] {
+				if strings.TrimSpace(next) == "---" || (next != "" && next[0] != ' ' && next[0] != '\t') {
+					break
+				}
+				if t := strings.TrimSpace(next); t != "" {
+					parts = append(parts, t)
+				}
+			}
+			return strings.Join(parts, " ")
+		}
+		return strings.Trim(value, `"'`)
 	}
 	return ""
 }

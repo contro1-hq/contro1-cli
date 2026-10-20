@@ -130,7 +130,7 @@ func init() {
 			ctx := cmd.Context()
 			prompt := terminalPrompt{json: flagFormat == "json"}
 
-			conn, err := platforms.SelectLocalConnection(appsAgent)
+			conn, err := platforms.SelectLocalConnectionFor(platform, appsAgent)
 			if err != nil {
 				if errors.Is(err, platforms.ErrNoLocalConnection) {
 					return output.Errf(output.CodeBadArgs,

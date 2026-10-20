@@ -288,7 +288,7 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		lines := []string{
 			"Agents: " + strings.Join(names, ", "),
 			"Accountable owner: " + ownerLabel,
-			"They can: ask people for approval. They cannot use organization applications.",
+			"They can: ask people for approval, and use the company applications their owner allows in Access.",
 		}
 		if !opts.Development {
 			plan := installer.Plan(hostGOOS(opts), installer.Options{APIURL: opts.APIURL})
@@ -621,9 +621,9 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 	 * approvals that were never going to come.
 	 */
 	remaining := o.Adapter.RemainingSetup()
-	ns.Message = fmt.Sprintf("%s is connected (%d agent(s), Approvals only). %s", instanceLabel(p), len(mapping.Entries), o.Adapter.SafeTest())
+	ns.Message = fmt.Sprintf("%s is connected (%d agent(s)). %s", instanceLabel(p), len(mapping.Entries), o.Adapter.SafeTest())
 	if len(remaining) > 0 {
-		ns.Message = fmt.Sprintf("%s is connected (%d agent(s), Approvals only), but approvals will not reach Contro1 yet.", instanceLabel(p), len(mapping.Entries))
+		ns.Message = fmt.Sprintf("%s is connected (%d agent(s)), but it is not working end to end yet:", instanceLabel(p), len(mapping.Entries))
 		for i, step := range remaining {
 			ns.Checks = append(ns.Checks, runtimeproto.Check{
 				ID:      fmt.Sprintf("remaining_%d", i+1),

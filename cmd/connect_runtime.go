@@ -171,6 +171,15 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 			args = append(args, "--api-url", apiURL)
 		}
 		code, err := installer.RunElevated(args)
+		if errors.Is(err, installer.ErrElevationDeclined) {
+			// Exit status 1 is also what the elevated phase returns when it ran
+			// and failed. Reported as "declined", a real failure sent people to
+			// run connect again, which opened a second request. The phase file
+			// says which it was.
+			if done, _ := readPhaseFile(path); done != nil && done.Error != "" {
+				return nil, errors.New(done.Error)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -402,10 +411,27 @@ func (p terminalPrompt) Confirm(title string, lines []string) bool {
 	return answer == "y" || answer == "yes"
 }
 
+/*
+Progress goes to stderr, so stdout stays the one JSON result.
+
+IN JSON MODE IT IS NOT DROPPED. That mode is how a coding assistant runs
+connect, and it used to print nothing until the end: the approval link went
+nowhere, the assistant waited out its own timeout, and nobody approved
+anything. Each line is a small JSON object instead. The approval line is
+printed even with --quiet, because without it nothing can finish.
+*/
 func (p terminalPrompt) Progress(line string) {
-	if !p.json && !flagQuiet {
-		fmt.Fprintln(os.Stderr, line)
+	if !p.json {
+		if !flagQuiet {
+			fmt.Fprintln(os.Stderr, line)
+		}
+		return
 	}
+	if flagQuiet && !strings.HasPrefix(line, "Approve at ") {
+		return
+	}
+	encoded, _ := json.Marshal(map[string]string{"progress": line})
+	fmt.Fprintln(os.Stderr, string(encoded))
 }
 
 type fileStates struct{}

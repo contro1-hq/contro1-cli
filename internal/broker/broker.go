@@ -374,6 +374,27 @@ func (b *Broker) markLocal(localID, state, code string) {
 	})
 }
 
+// setLocalMode records the mode the server reported for one connection and
+// rewrites the platform mapping, which carries it too.
+func (b *Broker) setLocalMode(localID, mode string) {
+	var platform string
+	_, _ = b.store.UpdateState(func(st *brokerstore.State) error {
+		for i := range st.Enrollments {
+			if st.Enrollments[i].LocalID == localID {
+				st.Enrollments[i].EndpointMode = mode
+				platform = st.Enrollments[i].Platform
+			}
+		}
+		return nil
+	})
+	if platform != "" {
+		if _, _, err := b.writeMapping(platform, ""); err != nil {
+			b.cfg.Logf("mapping for %s: %v", platform, err)
+		}
+	}
+	b.writeStatus()
+}
+
 func randomID(prefix string) string {
 	buf := make([]byte, 8)
 	_, _ = rand.Read(buf)

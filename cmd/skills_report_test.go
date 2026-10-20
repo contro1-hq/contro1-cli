@@ -295,3 +295,15 @@ func TestCoworkSkillsFound(t *testing.T) {
 		t.Fatalf("client %q, want cowork", got)
 	}
 }
+
+// A multi-line description (description: >-) is read as its text, not as
+// the ">-" marker.
+func TestFrontmatterFieldBlockScalar(t *testing.T) {
+	md := "---\nname: onecli-gateway\ndescription: >-\n  OneCLI Gateway: a proxy\n  for outbound calls.\nmetadata:\n  a: b\n---\nbody\n"
+	if got := frontmatterField(md, "description"); got != "OneCLI Gateway: a proxy for outbound calls." {
+		t.Fatalf("description %q", got)
+	}
+	if got := frontmatterField("---\nname: x\ndescription: \"plain\"\n---\n", "description"); got != "plain" {
+		t.Fatalf("plain description %q", got)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 /*
@@ -151,13 +152,15 @@ func (o *openClaw) ApplyApplications(context.Context, LocalConnection, *Journal)
 func (c *claudeCode) ApplicationChanges(conn LocalConnection) []Change {
 	return []Change{{
 		Kind:        "mcp",
-		Description: "Register the Contro1 MCP server with Claude Code",
-		After:       "claude mcp add contro1 -- contro1 " + strings.Join(mcpArgs(conn.PlatformSubject), " "),
+		Description: "Register the Contro1 MCP server with Claude Code, for every folder",
+		After:       "claude mcp add --scope user contro1 -- contro1 " + strings.Join(mcpArgs(conn.PlatformSubject), " "),
 	}}
 }
 
 func (c *claudeCode) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
-	args := append([]string{"mcp", "add", "contro1", "--", "contro1"}, mcpArgs(conn.PlatformSubject)...)
+	// User scope: the default is the folder the command ran in, so Claude Code
+	// opened anywhere else had no Contro1 at all.
+	args := append([]string{"mcp", "add", "--scope", "user", "contro1", "--", "contro1"}, mcpArgs(conn.PlatformSubject)...)
 	if _, err := c.opts.Runner(ctx, "claude", args...); err != nil {
 		return fmt.Errorf("claude mcp add: %w", err)
 	}
@@ -189,9 +192,55 @@ func (n *nanoClaw) RemainingSetup() []string {
 	}
 }
 
-// The OpenClaw bridge is the approver by being deployed; nothing is installed
-// into OpenClaw itself.
-func (o *openClaw) RemainingSetup() []string { return nil }
+/*
+OpenClaw only sends Contro1 what it stops for, and connecting changes neither.
 
-// Claude Code is governed by the hook the connector installs, not by a channel.
-func (c *claudeCode) RemainingSetup() []string { return nil }
+The bridge is the approver by being deployed, and nothing is installed into
+OpenClaw itself, so connect cannot tell whether OpenClaw will ever stop. Its
+exec tool may be off (the assistant then says it cannot run commands at all),
+or on without asking. Saying "connected, try it" here sent people to a test
+that could not work.
+*/
+func (o *openClaw) RemainingSetup() []string {
+	return []string{
+		"Let the assistant run commands, and stop for approval before each one: openclaw config set tools.exec.mode ask",
+		"Start the Contro1 bridge for OpenClaw on this computer. It hands those approvals to Contro1: https://contro1.com/docs/openclaw-human-approval",
+		"Check it: contro1 doctor openclaw",
+		`Then ask your assistant to run "touch ~/contro1-test.txt". Contro1 asks you to approve it first.`,
+	}
+}
+
+/*
+Claude Code needs two things connecting does not install, and the end of
+`contro1 connect claude-code` used to say "Try it" with neither in place: the
+approval hook, which nothing on the computer had wired, and the MCP server,
+which was a second command nobody was told about. Each is named only while it
+is missing, so a computer that has both hears "Try it" and nothing else.
+*/
+func (c *claudeCode) RemainingSetup() []string {
+	var steps []string
+	if !c.hookInstalled() {
+		steps = append(steps, "Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/claude-code-permission-approvals")
+	}
+	if !c.mcpRegistered() {
+		steps = append(steps, "Company applications through Contro1 (the MCP server): contro1 apps enable claude-code")
+	}
+	if len(steps) > 0 {
+		steps = append(steps, "Check it: contro1 doctor claude-code")
+	}
+	return steps
+}
+
+// hookInstalled reads the user's Claude Code settings for the Contro1 hook.
+func (c *claudeCode) hookInstalled() bool {
+	raw, err := os.ReadFile(filepath.Join(c.opts.Home, ".claude", "settings.json"))
+	return err == nil && strings.Contains(string(raw), "centcom-claude-code")
+}
+
+// mcpRegistered asks Claude Code itself, which knows every scope it reads.
+func (c *claudeCode) mcpRegistered() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := c.opts.Runner(ctx, "claude", "mcp", "get", "contro1")
+	return err == nil
+}

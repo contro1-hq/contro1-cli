@@ -52,6 +52,24 @@ func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, runtimeproto.EndpointInfo{AgentID: en.AgentID, EnrollmentID: en.EnrollmentID, EndpointMode: en.EndpointMode, ModeLabel: runtimeproto.ModeLabel(en.EndpointMode), PlatformSubject: en.PlatformSubject, State: en.State})
 		return
 	}
+	if en.EndpointMode == runtimeproto.ModeApprovalsOnly && !runtimeproto.AllowedRoute(en.EndpointMode, r.Method, path) &&
+		runtimeproto.AllowedRoute(runtimeproto.ModeApplications, r.Method, path) {
+		/*
+		 * THE OWNER'S SWITCH TAKES EFFECT HERE, not after a terminal step.
+		 *
+		 * The mode was written once, at connect, and nothing ever changed it:
+		 * the dashboard told the owner to run a repair that did not touch it,
+		 * so allowing applications in Contro1 did nothing on the computer. The
+		 * server already holds the live decision and authorizes every one of
+		 * these calls against it, so the local list follows it. Only a call
+		 * the narrow list refuses asks, so an approvals-only agent costs no
+		 * extra round trip.
+		 */
+		if live := ds.liveMode(r.Context()); live == runtimeproto.ModeApplications {
+			ds.b.setLocalMode(ds.localID, live)
+			en.EndpointMode = live
+		}
+	}
 	if !runtimeproto.AllowedRoute(en.EndpointMode, r.Method, path) {
 		code := "ENDPOINT_METHOD_NOT_ALLOWED"
 		msg := "This agent's connection cannot use that part of Contro1."
@@ -59,7 +77,7 @@ func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if en.EndpointMode == runtimeproto.ModeApprovalsOnly && runtimeproto.AllowedRoute(runtimeproto.ModeApplications, r.Method, path) {
 			code = "APPLICATION_ACTIONS_NOT_ENABLED"
 			msg = "I can ask for approvals, but I cannot use organization applications."
-			next = "Ask the accountable owner to enable Approvals + applications for this agent."
+			next = "Ask the accountable owner to allow applications: run contro1 apps enable " + en.Platform + " on this computer. It opens the page in Contro1 and finishes the setup here."
 		}
 		writeRemediation(w, 403, runtimeproto.Remediation{Code: code, PublicMessage: msg, Missing: runtimeproto.ModeLabel(en.EndpointMode) + " does not include this call.", NextStep: next})
 		return
@@ -124,6 +142,42 @@ func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// liveModeView is the one field read from the server's description of a credential.
+type liveModeView struct {
+	EndpointMode string `json:"endpoint_mode"`
+}
+
+// liveMode asks the server which mode this connection has now, or "" when it
+// cannot tell. Through forward, so a token minted before the change is refreshed.
+func (ds *dataServer) liveMode(ctx context.Context) string {
+	target := strings.TrimRight(ds.b.cfg.APIURL, "/") + "/api/centcom/v1/runtime/status"
+	probe, err := http.NewRequestWithContext(ctx, "GET", target, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := ds.forward(ctx, probe, target, nil, runtimeproto.ResourceAPI)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	var body struct {
+		Auth       *liveModeView `json:"auth"`
+		Credential *liveModeView `json:"credential"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body) != nil {
+		return ""
+	}
+	for _, c := range []*liveModeView{body.Auth, body.Credential} {
+		if c != nil && runtimeproto.ValidMode(c.EndpointMode) {
+			return c.EndpointMode
+		}
+	}
+	return ""
 }
 
 // forward sends the request with a fresh credential, retrying once for a

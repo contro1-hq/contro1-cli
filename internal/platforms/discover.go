@@ -129,7 +129,26 @@ off their screen should not have to translate it first.
 Ambiguity is never resolved by picking the first one. One agent, or a name.
 */
 func SelectLocalConnection(selector string) (LocalConnection, error) {
+	return SelectLocalConnectionFor("", selector)
+}
+
+// SelectLocalConnectionFor is SelectLocalConnection limited to one platform.
+//
+// A computer with Claude Code and three OpenClaw agents has four connections,
+// and `contro1 apps enable claude-code` was refused as ambiguous although only
+// one of them is Claude Code. The platform the person named narrows the list
+// before anything is asked of them.
+func SelectLocalConnectionFor(platform, selector string) (LocalConnection, error) {
 	connections, problems := LocalConnections()
+	if platform != "" {
+		mine := connections[:0:0]
+		for _, c := range connections {
+			if c.Platform == platform {
+				mine = append(mine, c)
+			}
+		}
+		connections = mine
+	}
 	selector = strings.TrimSpace(selector)
 
 	if selector != "" {

@@ -459,7 +459,7 @@ func TestConnectSaysWhatItDidNotFinish(t *testing.T) {
 	if ns.State != runtimeproto.StateConnected {
 		t.Fatalf("the connection itself did succeed: %+v", ns)
 	}
-	if !strings.Contains(ns.Message, "will not reach Contro1 yet") {
+	if !strings.Contains(ns.Message, "not working end to end yet") {
 		t.Fatalf("a connection that governs nothing must not read as finished: %q", ns.Message)
 	}
 	if len(ns.Checks) != 2 || ns.Checks[0].Status != runtimeproto.CheckWaiting {
