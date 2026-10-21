@@ -96,11 +96,18 @@ func (f *fakeBroker) SetPrincipals(context.Context, string, []broker.ControlPrin
 	return nil
 }
 
-type fakeVerifier struct{ fail map[string]bool }
+type fakeVerifier struct {
+	fail map[string]bool
+	// liveMode, when set, is the mode the server reports for every agent.
+	liveMode string
+}
 
 func (f fakeVerifier) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, string, error) {
 	if f.fail[e.PlatformSubject] {
 		return "", "", errors.New("endpoint not reachable")
+	}
+	if f.liveMode != "" {
+		return e.AgentID, f.liveMode, nil
 	}
 	return e.AgentID, e.EndpointMode, nil
 }
@@ -486,6 +493,8 @@ type fakeMcp struct {
 	installErr   error
 	probeErr     map[string]error
 	tools        int
+	// installedModes is the endpoint mode of each entry handed to Install.
+	installedModes []string
 }
 
 func (f *fakeMcp) Changes(_ context.Context, subjects []string) []platforms.Change {
@@ -493,8 +502,12 @@ func (f *fakeMcp) Changes(_ context.Context, subjects []string) []platforms.Chan
 	return []platforms.Change{{Kind: "mcp", Description: "Add the MCP server contro1-main to OpenClaw", After: "openclaw mcp add contro1-main --command /usr/local/bin/contro1 --arg mcp --arg serve --arg --agent --arg main"}}
 }
 
-func (f *fakeMcp) Install(context.Context, *runtimeproto.MappingFile, *platforms.Journal) (platforms.McpOutcome, error) {
+func (f *fakeMcp) Install(_ context.Context, m *runtimeproto.MappingFile, _ *platforms.Journal) (platforms.McpOutcome, error) {
 	f.installs++
+	f.installedModes = nil
+	for _, e := range m.Entries {
+		f.installedModes = append(f.installedModes, e.EndpointMode)
+	}
 	return f.outcome, f.installErr
 }
 
@@ -582,6 +595,32 @@ func TestAFailedMcpCheckIsTheResult(t *testing.T) {
 	ns = o2.Run(context.Background(), opts)
 	if ns.State != runtimeproto.StateError || !strings.Contains(ns.Checks[0].Message, "exit status 1") || ns.NextCommand != "contro1 connect openclaw" {
 		t.Fatalf("an install failure is the result and running connect again is the fix: %+v", ns)
+	}
+}
+
+// An agent that was already connected, then allowed applications by its owner.
+// Connect reuses the connection, and used to carry on with the mode the
+// mapping was first written with: the MCP step and doctor both saw it stale.
+func TestConnectFollowsTheLiveModeOfAnExistingConnection(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	mcp := &fakeMcp{tools: 5}
+	o.Mcp = mcp
+	api.batch = BatchView{State: "approved"}
+	opts := base()
+	opts.Yes = true
+	if ns := o.Run(context.Background(), opts); ns.State != runtimeproto.StateConnected {
+		t.Fatalf("first connect: %+v", ns)
+	}
+	if strings.Join(mcp.installedModes, ",") != runtimeproto.ModeApprovalsOnly+","+runtimeproto.ModeApprovalsOnly {
+		t.Fatalf("connected approvals only: %v", mcp.installedModes)
+	}
+
+	o.Verifier = fakeVerifier{liveMode: runtimeproto.ModeApplications}
+	if ns := o.Run(context.Background(), opts); ns.State != runtimeproto.StateConnected {
+		t.Fatalf("rerun: %+v", ns)
+	}
+	if strings.Join(mcp.installedModes, ",") != runtimeproto.ModeApplications+","+runtimeproto.ModeApplications {
+		t.Fatalf("the rerun must use the mode the server reports: %v", mcp.installedModes)
 	}
 }
 

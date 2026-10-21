@@ -97,6 +97,30 @@ func fetchRuntimeStatus(ctx context.Context, conn platforms.LocalConnection) (ru
 
 // truncateForError keeps an unexpected body short enough to read and short
 // enough not to paste a wall of JSON into somebody's terminal.
+/*
+appsEnableClosing is the last thing `contro1 apps enable` says.
+
+WHY NOT ALWAYS "Try it". It used to end with "Done. Try it: ask Claude Code
+to run a command that needs approval." on a computer where the approval hook
+was not installed, so the try failed with nothing to show why. Connect
+already names what is still missing instead of the try line; this says the
+same thing the same way. remaining is what the platform still needs by hand;
+mcpTodo was printed above as "Still to do", so it only holds back the try line.
+*/
+func appsEnableClosing(platform string, remaining, mcpTodo []string, safeTest string) []string {
+	if len(remaining) == 0 && len(mcpTodo) == 0 {
+		return []string{"Done. " + safeTest}
+	}
+	if len(remaining) == 0 {
+		return []string{"Applications are set up. Finish the step above, then: " + safeTest}
+	}
+	lines := []string{"Applications are set up, but " + platform + " is not working end to end yet. Still to do:"}
+	for _, step := range remaining {
+		lines = append(lines, "  - "+step)
+	}
+	return append(lines, "Then check it with: contro1 doctor "+platform)
+}
+
 func truncateForError(body string) string {
 	body = strings.TrimSpace(body)
 	if len(body) > 300 {
@@ -199,6 +223,7 @@ func init() {
 			}
 
 			journal := &platforms.Journal{}
+			var mcpTodo []string
 			if installer, ok := adapter.(platforms.McpInstaller); ok {
 				outcome, err := installer.InstallMcp(ctx, platforms.McpSubjects(platform, conn.PlatformSubject), journal)
 				if err != nil {
@@ -210,11 +235,14 @@ func init() {
 				for _, line := range outcome.ToDo {
 					prompt.Progress("Still to do: " + line)
 				}
+				mcpTodo = outcome.ToDo
 			} else if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
-			prompt.Progress("Done. " + adapter.SafeTest())
+			for _, line := range appsEnableClosing(platform, adapter.RemainingSetup(), mcpTodo, adapter.SafeTest()) {
+				prompt.Progress(line)
+			}
 			return renderApplicationsResult(conn, status, journal)
 		},
 	}

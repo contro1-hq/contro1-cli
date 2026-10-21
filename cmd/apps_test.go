@@ -87,6 +87,27 @@ func TestAWrongFieldNameFailsLoudlyRatherThanSilently(t *testing.T) {
 	}
 }
 
+// apps enable said "Try it" on a computer without the approval hook, so the
+// try failed. With anything still to do it lists that instead, as connect does.
+func TestAppsEnableNamesWhatIsLeftInsteadOfTryIt(t *testing.T) {
+	try := "Try it: ask Claude Code to run a command that needs approval."
+	if got := appsEnableClosing("claude-code", nil, nil, try); len(got) != 1 || got[0] != "Done. "+try {
+		t.Fatalf("nothing left: the try line: %v", got)
+	}
+	hook := "Install the Contro1 approval hook: contro1 hooks install claude-code"
+	got := strings.Join(appsEnableClosing("claude-code", []string{hook}, nil, try), "\n")
+	if strings.Contains(got, "Try it") || strings.Contains(got, "Done.") {
+		t.Fatalf("with a step left there is no try line: %q", got)
+	}
+	if !strings.Contains(got, hook) || !strings.Contains(got, "not working end to end yet") || !strings.Contains(got, "contro1 doctor claude-code") {
+		t.Fatalf("the step and the check are named: %q", got)
+	}
+	got = strings.Join(appsEnableClosing("openclaw", nil, []string{"Restart the OpenClaw gateway."}, "Try it."), "\n")
+	if strings.HasPrefix(got, "Done.") {
+		t.Fatalf("an MCP step still to do holds back \"Done\": %q", got)
+	}
+}
+
 func TestAnUnexpectedBodyIsShownButNotDumped(t *testing.T) {
 	long := strings.Repeat("x", 1000)
 	if got := truncateForError(long); len(got) != 303 || !strings.HasSuffix(got, "...") {

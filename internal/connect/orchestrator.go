@@ -610,9 +610,15 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 	o.Prompt.Progress("Checking each agent...")
 	ns := step(p, runtimeproto.StateConnected, "")
 	allOK := true
-	for _, e := range mapping.Entries {
+	for i, e := range mapping.Entries {
 		agent := runtimeproto.AgentState{PlatformName: e.PlatformSubject, AgentID: e.AgentID, State: runtimeproto.StateConnected}
-		agentID, _, err := o.Verifier.RuntimeStatus(ctx, e)
+		agentID, liveMode, err := o.Verifier.RuntimeStatus(ctx, e)
+		if err == nil && agentID == e.AgentID && runtimeproto.ValidMode(liveMode) && liveMode != e.EndpointMode {
+			// The owner changed the mode after this agent was connected. The
+			// service records it from this very status answer and rewrites the
+			// mapping; what follows (the MCP step) uses the live mode now.
+			mapping.Entries[i].EndpointMode = liveMode
+		}
 		if err == nil && agentID != e.AgentID {
 			err = fmt.Errorf("endpoint speaks as %s", agentID)
 		}

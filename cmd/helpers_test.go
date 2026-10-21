@@ -1,6 +1,37 @@
 package cmd
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/contro1-hq/contro1-cli/internal/config"
+)
+
+// A localhost profile left over from development made a clean connect test
+// run against a server nobody else can reach, silently.
+func TestADevelopmentServerIsNamedAndProductionIsNot(t *testing.T) {
+	cfg := &config.Config{CurrentProfile: "default", Profiles: map[string]*config.Profile{
+		"default": {APIURL: "http://localhost:8080", WebURL: "http://localhost:3000"},
+	}}
+	note := developmentServerNote(cfg, "default", "http://localhost:8080", "http://localhost:3000")
+	if note != "Using a development server at http://localhost:8080. For production: contro1 config profiles use prod" {
+		t.Fatalf("%q", note)
+	}
+	// Only the web URL on this computer still counts.
+	if note := developmentServerNote(cfg, "default", "https://api.contro1.com", "http://127.0.0.1:3000/"); !strings.Contains(note, "http://127.0.0.1:3000.") {
+		t.Fatalf("%q", note)
+	}
+	// An existing production profile is the one named.
+	cfg.Profiles["work"] = &config.Profile{APIURL: "https://api.contro1.com", WebURL: "https://contro1.com"}
+	if note := developmentServerNote(cfg, "default", "http://[::1]:8080", ""); !strings.HasSuffix(note, "profiles use work") {
+		t.Fatalf("%q", note)
+	}
+	for _, prod := range []string{"https://api.contro1.com", "https://contro1.com", "https://localhost.example.com", ""} {
+		if note := developmentServerNote(cfg, "work", prod, "https://contro1.com"); note != "" {
+			t.Fatalf("nothing for %q: %q", prod, note)
+		}
+	}
+}
 
 func TestStr(t *testing.T) {
 	cases := []struct {

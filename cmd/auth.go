@@ -95,6 +95,9 @@ func runLogin(cmd *cobra.Command, _ []string) error {
 	if flagAPIURL != "" {
 		pr.APIURL = flagAPIURL
 	}
+	if note := developmentServerNote(cfg, name, pr.APIURL, pr.WebURL); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
 
 	device := loginName
 	if device == "" {

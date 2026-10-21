@@ -28,6 +28,8 @@ type fakeContro1 struct {
 	seen     []*http.Request
 	bodies   []string
 	refresh  int
+	// statusMode, when set, is the endpoint_mode runtime status reports.
+	statusMode string
 }
 
 func (f *fakeContro1) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,6 +58,10 @@ func (f *fakeContro1) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		f.seen = append(f.seen, r.Clone(context.Background()))
 		f.bodies = append(f.bodies, string(body))
+		if r.URL.Path == runtimeStatusPath && f.statusMode != "" {
+			fmt.Fprintf(w, `{"ok":true,"auth":{"agent_id":"agt_main","credential_kind":"agent_runtime","endpoint_mode":%q}}`, f.statusMode)
+			return
+		}
 		fmt.Fprint(w, `{"ok":true,"auth":{"agent_id":"agt_main","credential_kind":"agent_runtime"}}`)
 	}
 }
@@ -191,6 +197,28 @@ func TestBrokerEndToEnd(t *testing.T) {
 	check("POST", "/control/v1/connections", `{}`, 403, "ENDPOINT_METHOD_NOT_ALLOWED")
 	check("GET", "/api/centcom/v1/requests?agent_id=agt_other", "", 400, "IDENTITY_SELECTOR_REJECTED")
 	check("POST", "/api/centcom/v1/requests", `{"metadata":{"actor":{"agent_id":"agt_other"}}}`, 403, "AGENT_IDENTITY_MISMATCH")
+
+	// The owner allowed applications. A plain status call through the
+	// endpoint (what connect and doctor make) records it, and the agent gets
+	// the whole answer unchanged.
+	api.mu.Lock()
+	api.statusMode = runtimeproto.ModeApplications
+	api.mu.Unlock()
+	statusResp, err := dc.Get(localipc.BaseURL + runtimeStatusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusRaw, _ := io.ReadAll(statusResp.Body)
+	statusResp.Body.Close()
+	if statusResp.StatusCode != 200 || !strings.Contains(string(statusRaw), `"endpoint_mode":"`+runtimeproto.ModeApplications+`"`) {
+		t.Fatalf("status passed through: %d %s", statusResp.StatusCode, statusRaw)
+	}
+	if en, err := b.enrollment(localID); err != nil || en.EndpointMode != runtimeproto.ModeApplications {
+		t.Fatalf("a status answer must update the local mode: %+v %v", en, err)
+	}
+	api.mu.Lock()
+	api.statusMode = ""
+	api.mu.Unlock()
 
 	// Mapping file: exact subject to endpoint, no secrets.
 	resp, err = cc.Post(localipc.BaseURL+"/control/v1/mappings", "application/json", strings.NewReader(`{"platform":"openclaw"}`))

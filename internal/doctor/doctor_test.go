@@ -16,6 +16,7 @@ type fakeEnv struct {
 	controlOpen                   bool
 	status                        *brokerstore.PublicStatus
 	mapping                       *runtimeproto.MappingFile
+	refreshOnStatus               bool
 	discovered                    []string
 	principals                    map[string][]string
 	expected                      map[string]string
@@ -119,6 +120,18 @@ func (f *fakeEnv) ExpectedPrincipals(_, subject string) ([]string, error) {
 func (f *fakeEnv) RuntimeStatus(_ context.Context, e runtimeproto.MappingEntry) (string, string, *runtimeproto.Remediation, error) {
 	if f.remediation != nil {
 		return "", "", f.remediation, errors.New("refused")
+	}
+	if f.refreshOnStatus && f.mapping != nil && f.liveMode != "" {
+		// What the Contro1 service does with a status answer: record the
+		// mode and rewrite the mapping file.
+		fresh := *f.mapping
+		fresh.Entries = append([]runtimeproto.MappingEntry(nil), f.mapping.Entries...)
+		for i := range fresh.Entries {
+			if fresh.Entries[i].Endpoint == e.Endpoint {
+				fresh.Entries[i].EndpointMode = f.liveMode
+			}
+		}
+		f.mapping = &fresh
 	}
 	// Empty unless a test sets it: an older service does not report the mode.
 	return f.agentFor[e.Endpoint], f.liveMode, nil, nil
@@ -396,6 +409,22 @@ func TestTheModeReportedIsTheOneTheServerGives(t *testing.T) {
 	// was configured from and somebody will wonder why they differ.
 	if !strings.Contains(c.Message, "mapping file on this computer still says") {
 		t.Fatalf("a disagreement must be named, not smoothed over: %q", c.Message)
+	}
+	// And it names what refreshes the file. It used to send people to
+	// contro1 connect, which did not refresh it.
+	if strings.Contains(c.Message, "refreshed by contro1 connect") || !strings.Contains(c.Message, "renews this agent's credential") {
+		t.Fatalf("the stale note must say what actually refreshes it: %q", c.Message)
+	}
+
+	// The service rewrote the file from the status answer this check got:
+	// nothing stale is left to report.
+	env = healthy()
+	env.liveMode = runtimeproto.ModeApplications
+	env.refreshOnStatus = true
+	r = Run(context.Background(), env, "nanoclaw")
+	c, _ = findCheck(r, "runtime_status:group-a")
+	if strings.Contains(c.Message, "still says") || !strings.Contains(c.Message, runtimeproto.ModeLabel(runtimeproto.ModeApplications)) {
+		t.Fatalf("a refreshed mapping is not stale: %q", c.Message)
 	}
 
 	// An older service that does not report the mode falls back to the file

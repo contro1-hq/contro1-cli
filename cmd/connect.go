@@ -174,6 +174,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	if flagAPIURL != "" {
 		apiURL = flagAPIURL
 	}
+	printDevelopmentServerNote(os.Stderr, flagAPIURL)
 	host, _ := os.Hostname()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

@@ -271,10 +271,17 @@ func Run(ctx context.Context, env Env, platform string) Report {
 					mode = e.EndpointMode
 				}
 				message := runtimeproto.ModeLabel(mode) + "."
-				if liveMode != "" && liveMode != e.EndpointMode {
-					// Worth saying: the endpoint serves what the server allows,
-					// and the file is what `contro1 connect` last wrote.
-					message += " The mapping file on this computer still says " + runtimeproto.ModeLabel(e.EndpointMode) + "; it is refreshed by contro1 connect."
+				if liveMode != "" && liveMode != e.EndpointMode && mappedMode(env, platform, e.PlatformSubject) != liveMode {
+					/*
+					 * Worth saying only while it is still true. The Contro1
+					 * service records the mode from the status answer this check
+					 * just received and rewrites the mapping, so the file is read
+					 * again before calling it stale. It used to say "refreshed by
+					 * contro1 connect", and connect did not refresh it: the
+					 * sentence has to name what actually does.
+					 */
+					message += " The mapping file on this computer still says " + runtimeproto.ModeLabel(e.EndpointMode) +
+						". The Contro1 service rewrites it when it renews this agent's credential or when the agent first uses an application; the endpoint already follows Contro1, so nothing is needed from you."
 				}
 				add(&r, runtimeproto.Check{ID: rid, Label: "Contro1 recognises " + e.PlatformSubject, Status: runtimeproto.CheckOK, Message: message})
 				if err := env.ControlMapPreview(ctx, e); err != nil {
@@ -297,6 +304,21 @@ func Run(ctx context.Context, env Env, platform string) Report {
 		}
 	}
 	return r
+}
+
+// mappedMode is the mode the mapping file records for one subject now, or ""
+// when the file cannot be read.
+func mappedMode(env Env, platform, subject string) string {
+	m, err := env.Mapping(platform)
+	if err != nil || m == nil {
+		return ""
+	}
+	for _, e := range m.Entries {
+		if e.PlatformSubject == subject {
+			return e.EndpointMode
+		}
+	}
+	return ""
 }
 
 func diff(discovered []string, m *runtimeproto.MappingFile) (missing, extra []string) {

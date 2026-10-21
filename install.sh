@@ -40,6 +40,30 @@ url="https://github.com/${REPO}/releases/download/${version}/${asset}"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# replace_failed explains a failed copy when contro1 is running, then exits.
+# WHY: `install` normally replaces a running binary (it writes a new file),
+# but where it cannot ("Text file busy", a busybox install, a locked mount),
+# the raw error names a file and not the cause: an open Claude Code window
+# runs `contro1 mcp serve`. The running copies are listed, never moved aside.
+replace_failed() {
+  pids=$(pgrep -x "$BIN" 2>/dev/null || true)
+  if [ -n "$pids" ]; then
+    {
+      echo ""
+      echo "contro1 is running, so $1 could not be replaced."
+      echo "Usually it is Claude Code's Contro1 MCP connection, or contro1 in another terminal:"
+      for pid in $pids; do
+        line=$(ps -o pid= -o args= -p "$pid" 2>/dev/null || true)
+        echo "  ${line:-$pid $BIN}"
+      done
+      echo ""
+      echo "Close the Claude Code windows, or stop these processes: pkill -x $BIN"
+      echo "Then run the installer again."
+    } >&2
+  fi
+  exit 1
+}
 echo "Downloading $url"
 curl -fsSL "$url" -o "$tmp/$asset"
 tar -xzf "$tmp/$asset" -C "$tmp"
@@ -73,9 +97,9 @@ if [ -z "$dir" ]; then
     if [ -n "$can_sudo" ]; then
       echo "Installing to $dir (sudo)"
       if [ "$can_sudo" = tty ]; then
-        sudo install -m 0755 "$tmp/$BIN" "$dir/$BIN" </dev/tty
+        sudo install -m 0755 "$tmp/$BIN" "$dir/$BIN" </dev/tty || replace_failed "$dir/$BIN"
       else
-        sudo -n install -m 0755 "$tmp/$BIN" "$dir/$BIN"
+        sudo -n install -m 0755 "$tmp/$BIN" "$dir/$BIN" || replace_failed "$dir/$BIN"
       fi
       echo "Installed: $("$dir/$BIN" --version 2>/dev/null || echo "$dir/$BIN")"
       exit 0
@@ -85,7 +109,7 @@ if [ -z "$dir" ]; then
   fi
 fi
 mkdir -p "$dir"
-install -m 0755 "$tmp/$BIN" "$dir/$BIN"
+install -m 0755 "$tmp/$BIN" "$dir/$BIN" || replace_failed "$dir/$BIN"
 echo "Installed contro1 to $dir/$BIN"
 "$dir/$BIN" --version 2>/dev/null || true
 found=$(command -v "$BIN" 2>/dev/null || true)

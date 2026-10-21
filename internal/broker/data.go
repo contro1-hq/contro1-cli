@@ -121,6 +121,27 @@ func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if r.Method == "GET" && path == runtimeStatusPath && resp.StatusCode == http.StatusOK {
+		/*
+		 * A STATUS CALL IS THE SERVER SAYING THE MODE, so it is recorded.
+		 *
+		 * `contro1 connect` and `contro1 doctor` both ask for runtime status
+		 * through this endpoint. For an agent that was already connected,
+		 * connect reuses the connection and changes nothing else, so the
+		 * mapping kept the mode it was written with and doctor, right after
+		 * connect, still reported it as stale. The answer is already passing
+		 * through here; reading the mode off it costs no extra request. The
+		 * body is passed on byte for byte.
+		 */
+		head, _ := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), resp.Body), resp.Body}
+		if live := modeFromStatus(head); live != "" && live != en.EndpointMode {
+			ds.b.setLocalMode(ds.localID, live)
+		}
+	}
 	for k, vs := range resp.Header {
 		if hopHeaders[http.CanonicalHeaderKey(k)] {
 			continue
@@ -156,7 +177,7 @@ type liveModeView struct {
 // liveMode asks the server which mode this connection has now, or "" when it
 // cannot tell. Through forward, so a token minted before the change is refreshed.
 func (ds *dataServer) liveMode(ctx context.Context) string {
-	target := strings.TrimRight(ds.b.cfg.APIURL, "/") + "/api/centcom/v1/runtime/status"
+	target := strings.TrimRight(ds.b.cfg.APIURL, "/") + runtimeStatusPath
 	probe, err := http.NewRequestWithContext(ctx, "GET", target, nil)
 	if err != nil {
 		return ""
@@ -169,11 +190,22 @@ func (ds *dataServer) liveMode(ctx context.Context) string {
 	if resp.StatusCode != http.StatusOK {
 		return ""
 	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxStatusBody))
+	return modeFromStatus(raw)
+}
+
+const (
+	runtimeStatusPath = "/api/centcom/v1/runtime/status"
+	maxStatusBody     = 1 << 20
+)
+
+// modeFromStatus reads the mode out of a runtime status answer, or "".
+func modeFromStatus(raw []byte) string {
 	var body struct {
 		Auth       *liveModeView `json:"auth"`
 		Credential *liveModeView `json:"credential"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&body) != nil {
+	if json.Unmarshal(raw, &body) != nil {
 		return ""
 	}
 	for _, c := range []*liveModeView{body.Auth, body.Credential} {
