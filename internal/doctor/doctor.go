@@ -5,12 +5,14 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
+	"github.com/contro1-hq/contro1-cli/internal/platforms"
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 )
 
@@ -58,7 +60,37 @@ type Env interface {
 	// by the platform's credential gateway, and which other agents receive it
 	// too. An error means the gateway could not say, which is not a finding.
 	LeaseExposure(ctx context.Context, platform, subject string) (stored bool, exposedTo []string, err error)
+	// McpServerName is the MCP server name `contro1 connect` gives a subject,
+	// on platforms where connect installs it. Empty elsewhere.
+	McpServerName(platform, subject string) string
+	// McpProbe runs MCP initialize and tools/list through the agent's own
+	// endpoint, as `contro1 mcp serve` would, and counts the tools offered.
+	McpProbe(ctx context.Context, entry runtimeproto.MappingEntry) (tools int, err error)
+	// McpIsolation names each way one agent could use another agent's Contro1
+	// MCP server. ErrNotApplicable on a platform with nothing to isolate.
+	McpIsolation(ctx context.Context, platform string, subjects []string) ([]IsolationIssue, error)
+	// ConfigStatus is the platform's own verdict on its configuration.
+	// ErrNotApplicable when the platform has nothing to check.
+	ConfigStatus(ctx context.Context, platform string) (ConfigState, error)
 	Development() bool
+}
+
+// ErrNotApplicable is a question the platform has no answer to, which is not
+// a finding.
+var ErrNotApplicable = errors.New("not applicable on this platform")
+
+// IsolationIssue is one agent whose MCP tool rules are not what connect writes.
+type IsolationIssue struct {
+	Agent   string
+	Message string
+	// Exposure: this agent can act as another one.
+	Exposure bool
+}
+
+// ConfigState is whether the platform accepts its configuration.
+type ConfigState struct {
+	Valid   bool
+	Problem string
 }
 
 /*
@@ -180,10 +212,20 @@ func Run(ctx context.Context, env Env, platform string) Report {
 	}
 
 	if mapping != nil {
+		installsMcp := false
 		for _, e := range mapping.Entries {
 			addApproverChecks(ctx, &r, env, platform, e)
-			addApplicationChecks(ctx, &r, env, platform, e)
+			if name := env.McpServerName(platform, e.PlatformSubject); name != "" {
+				installsMcp = true
+				addMcpServerChecks(ctx, &r, env, platform, name, e)
+			} else {
+				addApplicationChecks(ctx, &r, env, platform, e)
+			}
 			addLeaseExposureChecks(ctx, &r, env, e)
+		}
+		if installsMcp {
+			addMcpIsolationChecks(ctx, &r, env, platform, mapping, discovered)
+			addConfigCheck(ctx, &r, env, platform)
 		}
 	}
 
@@ -450,4 +492,138 @@ func addApproverChecks(ctx context.Context, r *Report, env Env, platform string,
 	default:
 		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Approvals for this agent come to Contro1."})
 	}
+}
+
+/*
+The Contro1 MCP server, on platforms where `contro1 connect` installs it.
+
+Two questions, because each fails without the other: is the entry there and
+pointed at THIS agent, and does Contro1 answer MCP for this agent at all. The
+first is asked of the platform, the second of the agent's own endpoint, the
+same way `contro1 mcp serve` reaches it. A customer's agent showed only
+"MCP error -32000: Connection closed" in its chat; with both answers here the
+cause is one line.
+*/
+func addMcpServerChecks(ctx context.Context, r *Report, env Env, platform, name string, e runtimeproto.MappingEntry) {
+	subject := e.PlatformSubject
+	fix := "contro1 connect " + platform
+	if servers, err := env.McpServers(ctx, platform, subject); err == nil {
+		id := "mcp_server:" + subject
+		label := "MCP server for " + subject
+		var ours *McpServerConfig
+		for i := range servers {
+			if strings.EqualFold(servers[i].Name, name) {
+				ours = &servers[i]
+				break
+			}
+		}
+		entry := platforms.McpServer{}
+		if ours != nil {
+			entry = platforms.McpServer{Name: ours.Name, Command: ours.Command, Args: ours.Args, URL: ours.URL}
+		}
+		// Claude Code has used Contro1 for approvals alone since before connect
+		// installed the MCP server, and that is still a finished setup: there
+		// the server is an option, said with the command, never a failure.
+		optional := platform == "claude-code"
+		serves := entry.ServesAgent(subject)
+		if optional {
+			serves = platforms.ClaudeServesAgent(entry, subject)
+		}
+		switch {
+		case ours == nil && optional:
+			add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK,
+				Message:     "MCP not set up: run " + fix + " to let it use applications through Contro1.",
+				NextCommand: fix})
+			return
+		case ours == nil:
+			add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+				Message:     fmt.Sprintf("No Contro1 MCP server named %s is set up, so %s cannot use Contro1's tools.", name, subject),
+				NextCommand: fix})
+		case !serves && optional:
+			add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK,
+				Message:     fmt.Sprintf("The MCP server %s runs %q, not this agent. To use applications as this agent, run %s.", name, entry.Describe(), fix),
+				NextCommand: fix})
+			return
+		case !serves:
+			add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+				Message:     fmt.Sprintf("The MCP server %s runs %q, not contro1 mcp serve --agent %s, so it does not act as this agent.", name, entry.Describe(), subject),
+				NextCommand: fix})
+		default:
+			add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: fmt.Sprintf("%s runs contro1 mcp serve as %s.", name, subject)})
+		}
+	}
+
+	tools, err := env.McpProbe(ctx, e)
+	id := "mcp_live:" + subject
+	label := "MCP answers for " + subject
+	if err != nil {
+		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you", Message: err.Error(), NextCommand: fmt.Sprintf("contro1 connect %s --repair", platform)})
+		return
+	}
+	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: fmt.Sprintf("MCP connected: %d actions available.", tools)})
+}
+
+/*
+Can one agent act as another through its MCP server?
+
+OpenClaw's MCP servers belong to the gateway, so every agent sees every server
+unless its tool rules hide the others. An agent that can call another agent's
+Contro1 server acts as that agent, with its owner's approvals and its access.
+That is exposure, so it is blocked; the fix only narrows (connect writes the
+deny rules), never widens.
+*/
+func addMcpIsolationChecks(ctx context.Context, r *Report, env Env, platform string, m *runtimeproto.MappingFile, discovered []string) {
+	subjects := make([]string, 0, len(m.Entries))
+	for _, e := range m.Entries {
+		subjects = append(subjects, e.PlatformSubject)
+	}
+	everyone := map[string]bool{}
+	for _, s := range append(append([]string(nil), subjects...), discovered...) {
+		everyone[s] = true
+	}
+	fix := "contro1 connect " + platform
+	issues, err := env.McpIsolation(ctx, platform, subjects)
+	switch {
+	case errors.Is(err, ErrNotApplicable):
+		return
+	case err != nil:
+		if len(everyone) > 1 {
+			add(r, runtimeproto.Check{ID: "mcp_isolation", Label: "Each agent sees only its own Contro1 server", Status: runtimeproto.CheckRepairable, Actor: "you",
+				Message: "Could not confirm it: " + err.Error() + ". Each agent's agents.entries.<id>.tools.deny must list the other agents' contro1-<id>__* tools.", NextCommand: fix})
+		}
+		return
+	}
+	for _, issue := range issues {
+		status := runtimeproto.CheckRepairable
+		if issue.Exposure {
+			status = runtimeproto.CheckBlocked
+		}
+		add(r, runtimeproto.Check{ID: "mcp_isolation:" + issue.Agent, Label: "Only " + issue.Agent + " uses its Contro1 server", Status: status, Actor: "you", Message: issue.Message, NextCommand: fix})
+	}
+	if len(issues) == 0 && len(everyone) > 1 {
+		add(r, runtimeproto.Check{ID: "mcp_isolation", Label: "Each agent sees only its own Contro1 server", Status: runtimeproto.CheckOK, Message: "Every agent's tool rules hide the other agents' Contro1 servers."})
+	}
+}
+
+/*
+Does the platform accept its own configuration?
+
+OpenClaw keeps running the last configuration it accepted. One it rejects, for
+example a hand edit with a key the schema does not know, means every later
+change is refused or never applied, the Contro1 servers included, while the
+gateway looks healthy (docs/gateway/configuration/config-rpc.md).
+*/
+func addConfigCheck(ctx context.Context, r *Report, env Env, platform string) {
+	state, err := env.ConfigStatus(ctx, platform)
+	if err != nil {
+		return
+	}
+	id, label := "platform_config_valid", platform+" accepts its configuration"
+	if !state.Valid {
+		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message:     platform + " rejects its configuration (" + state.Problem + "). It keeps running the last good one, so changes such as the Contro1 servers do not apply.",
+			NextCommand: platform + " config validate"})
+		return
+	}
+	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: "Valid."})
 }

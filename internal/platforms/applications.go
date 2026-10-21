@@ -2,14 +2,12 @@ package platforms
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 /*
@@ -52,11 +50,6 @@ func contro1BinaryPath() string {
 // connections can never serve the wrong identity.
 func mcpArgs(subject string) []string {
 	return []string{"mcp", "serve", "--agent", subject}
-}
-
-func mcpArgsJSON(subject string) string {
-	raw, _ := json.Marshal(mcpArgs(subject))
-	return string(raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,39 +126,26 @@ func (n *nanoClaw) ApplyApplications(ctx context.Context, conn LocalConnection, 
 // ---------------------------------------------------------------------------
 
 // OpenClaw runs its MCP servers in the gateway process, on this host, where the
-// binary and the socket already are, so nothing is mounted. The entry is shown
-// rather than written: this tool does not rewrite a config file it did not
-// create, and openclaw.json is the person's.
+// binary and the socket already are, so nothing is mounted. `apps enable` runs
+// the same step as connect: one server per agent and the tool rules between
+// them, which is why it covers every connected OpenClaw agent and not only the
+// one it was asked about.
 func (o *openClaw) ApplicationChanges(conn LocalConnection) []Change {
-	return []Change{{
-		Kind:        "mcp",
-		Path:        filepath.Join(o.opts.Home, ".openclaw", "openclaw.json"),
-		Description: "Add the Contro1 MCP server to OpenClaw, pointed at this agent",
-		After:       fmt.Sprintf("\"contro1\": {\"command\": \"contro1\", \"args\": %s}", mcpArgsJSON(conn.PlatformSubject)),
-	}}
+	return o.McpChanges(context.Background(), McpSubjects("openclaw", conn.PlatformSubject))
 }
 
-func (o *openClaw) ApplyApplications(context.Context, LocalConnection, *Journal) error {
-	return fmt.Errorf("add the entry shown above to openclaw.json yourself: this tool does not rewrite a config file it did not create")
+func (o *openClaw) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
+	_, err := o.InstallMcp(ctx, McpSubjects("openclaw", conn.PlatformSubject), j)
+	return err
 }
 
 func (c *claudeCode) ApplicationChanges(conn LocalConnection) []Change {
-	return []Change{{
-		Kind:        "mcp",
-		Description: "Register the Contro1 MCP server with Claude Code, for every folder",
-		After:       "claude mcp add --scope user contro1 -- contro1 " + strings.Join(mcpArgs(conn.PlatformSubject), " "),
-	}}
+	return c.McpChanges(context.Background(), []string{conn.PlatformSubject})
 }
 
 func (c *claudeCode) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
-	// User scope: the default is the folder the command ran in, so Claude Code
-	// opened anywhere else had no Contro1 at all.
-	args := append([]string{"mcp", "add", "--scope", "user", "contro1", "--", "contro1"}, mcpArgs(conn.PlatformSubject)...)
-	if _, err := c.opts.Runner(ctx, "claude", args...); err != nil {
-		return fmt.Errorf("claude mcp add: %w", err)
-	}
-	j.RoleCommands = append(j.RoleCommands, "claude "+strings.Join(args, " "))
-	return nil
+	_, err := c.InstallMcp(ctx, []string{conn.PlatformSubject}, j)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +183,13 @@ that could not work.
 */
 func (o *openClaw) RemainingSetup() []string {
 	return []string{
-		"Let the assistant run commands, and stop for approval before each one: openclaw config set tools.exec.mode ask",
+		// The preset sets security allowlist, ask on-miss and askFallback deny
+		// together (OpenClaw docs/cli/approvals.md, src/cli/exec-policy-cli.ts).
+		// `config set tools.exec.mode` refuses while a gateway owns the state.
+		"Make commands outside the allowlist stop for approval, and refuse when nobody answers: openclaw exec-policy preset cautious",
+		// An agent whose tool profile excludes terminal tools answers "I cannot
+		// run commands"; show names the exact alsoAllow entry that fixes it.
+		"Check each assistant can run commands at all: openclaw exec-policy show --agent <agent id>",
 		"Start the Contro1 bridge for OpenClaw on this computer. It hands those approvals to Contro1: https://contro1.com/docs/openclaw-human-approval",
 		"Check it: contro1 doctor openclaw",
 		`Then ask your assistant to run "touch ~/contro1-test.txt". Contro1 asks you to approve it first.`,
@@ -211,36 +197,25 @@ func (o *openClaw) RemainingSetup() []string {
 }
 
 /*
-Claude Code needs two things connecting does not install, and the end of
-`contro1 connect claude-code` used to say "Try it" with neither in place: the
-approval hook, which nothing on the computer had wired, and the MCP server,
-which was a second command nobody was told about. Each is named only while it
-is missing, so a computer that has both hears "Try it" and nothing else.
+Claude Code needs one thing connecting does not install: the approval hook,
+which nothing on the computer wires up. The end of `contro1 connect claude-code`
+used to say "Try it" without it. The MCP server used to be the second item here;
+connect installs it now, as its last step, so it is no longer the person's.
+Named only while it is missing, so a computer that has the hook hears "Try it"
+and nothing else.
 */
 func (c *claudeCode) RemainingSetup() []string {
-	var steps []string
-	if !c.hookInstalled() {
-		steps = append(steps, "Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/claude-code-permission-approvals")
+	if c.hookInstalled() {
+		return nil
 	}
-	if !c.mcpRegistered() {
-		steps = append(steps, "Company applications through Contro1 (the MCP server): contro1 apps enable claude-code")
+	return []string{
+		"Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/claude-code-permission-approvals",
+		"Check it: contro1 doctor claude-code",
 	}
-	if len(steps) > 0 {
-		steps = append(steps, "Check it: contro1 doctor claude-code")
-	}
-	return steps
 }
 
 // hookInstalled reads the user's Claude Code settings for the Contro1 hook.
 func (c *claudeCode) hookInstalled() bool {
 	raw, err := os.ReadFile(filepath.Join(c.opts.Home, ".claude", "settings.json"))
 	return err == nil && strings.Contains(string(raw), "centcom-claude-code")
-}
-
-// mcpRegistered asks Claude Code itself, which knows every scope it reads.
-func (c *claudeCode) mcpRegistered() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, err := c.opts.Runner(ctx, "claude", "mcp", "get", "contro1")
-	return err == nil
 }

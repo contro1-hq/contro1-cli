@@ -173,13 +173,18 @@ func init() {
 			prompt.Progress("Applications are allowed for this connection.")
 
 			// 2. The local work. Shown before it happens, because two of these
-			//    change how a container starts.
+			//    change how a container starts. The same step `contro1 connect`
+			//    runs last, so a second run here changes nothing.
 			changes := adapter.ApplicationChanges(conn)
 			lines := make([]string, 0, len(changes))
 			for _, c := range changes {
-				lines = append(lines, c.Description)
+				line := c.Description
+				if c.Before != "" {
+					line += " (now: " + c.Before + ")"
+				}
+				lines = append(lines, line)
 			}
-			if !appsYes {
+			if !appsYes && len(changes) > 0 {
 				if !prompt.Interactive() || !prompt.Confirm(fmt.Sprintf("Set up applications for %s?", displayOf(conn)), lines) {
 					fmt.Println(strings.Join(commandsOf(changes), "\n"))
 					return output.Errf(output.CodeUnsafeBlocked,
@@ -187,26 +192,25 @@ func init() {
 				}
 			}
 
-			// Provision the host gateway before restarting NanoClaw. OneCLI
-			// grants this secret to exactly the agent whose connection was approved;
-			// neither the secret nor a callback URL enters its container config.
 			if platform == "nanoclaw" {
-				if _, err := exec.LookPath("onecli"); err != nil {
-					return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host before its MCP server can be enabled")
+				if err := provisionNanoClawLease(ctx, conn, prompt.Progress); err != nil {
+					return err
 				}
-				lease, err := issueAgentLease(conn)
-				if err != nil {
-					return output.Errf(output.CodeNetwork, "%v", err)
-				}
-				if err := installOnecliLease(ctx, conn, mcpURL(), lease.Lease, runOnecliCommand); err != nil {
-					return output.Errf(output.CodeNetwork, "could not grant the Contro1 credential to this NanoClaw agent in OneCLI: %v", err)
-				}
-				expires, _ := time.Parse(time.RFC3339, lease.ExpiresAt)
-				afterNanoLeaseInstalled(ctx, nanoLease{Subject: conn.PlatformSubject, LeaseID: lease.LeaseID, ExpiresAt: expires, Endpoint: conn.Endpoint}, prompt.Progress)
 			}
 
 			journal := &platforms.Journal{}
-			if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
+			if installer, ok := adapter.(platforms.McpInstaller); ok {
+				outcome, err := installer.InstallMcp(ctx, platforms.McpSubjects(platform, conn.PlatformSubject), journal)
+				if err != nil {
+					return output.Errf(output.CodeNetwork, "%v", err)
+				}
+				for _, line := range outcome.Done {
+					prompt.Progress(line)
+				}
+				for _, line := range outcome.ToDo {
+					prompt.Progress("Still to do: " + line)
+				}
+			} else if err := adapter.ApplyApplications(ctx, conn, journal); err != nil {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
@@ -340,6 +344,29 @@ func init() {
 	renew.Flags().BoolVar(&renewQuiet, "quiet", false, "print nothing unless something fails")
 	appsCmd.AddCommand(renew)
 	rootCmd.AddCommand(appsCmd)
+}
+
+/*
+provisionNanoClawLease puts the agent's Contro1 credential in OneCLI before
+NanoClaw restarts with the MCP server. OneCLI grants this secret to exactly the
+agent whose connection was approved; neither the secret nor a callback URL
+enters its container config. Shared by `apps enable` and `connect`, so both
+take the same steps.
+*/
+func provisionNanoClawLease(ctx context.Context, conn platforms.LocalConnection, progress func(string)) error {
+	if _, err := exec.LookPath("onecli"); err != nil {
+		return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host before its MCP server can be enabled")
+	}
+	lease, err := issueAgentLease(conn)
+	if err != nil {
+		return output.Errf(output.CodeNetwork, "%v", err)
+	}
+	if err := installOnecliLease(ctx, conn, mcpURL(), lease.Lease, runOnecliCommand); err != nil {
+		return output.Errf(output.CodeNetwork, "could not grant the Contro1 credential to this NanoClaw agent in OneCLI: %v", err)
+	}
+	expires, _ := time.Parse(time.RFC3339, lease.ExpiresAt)
+	afterNanoLeaseInstalled(ctx, nanoLease{Subject: conn.PlatformSubject, LeaseID: lease.LeaseID, ExpiresAt: expires, Endpoint: conn.Endpoint}, progress)
+	return nil
 }
 
 // waitForApplications polls the agent's own endpoint until its owner widens the

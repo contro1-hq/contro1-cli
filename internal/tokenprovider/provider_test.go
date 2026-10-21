@@ -35,7 +35,18 @@ type fakeAS struct {
 	nonce      string
 	demandOnce bool
 	approved   bool
-	srv        *httptest.Server
+	// mode, when set, is written into access tokens as the server does.
+	mode string
+	srv  *httptest.Server
+}
+
+// token shapes an access token like the server's JWT when a mode is set.
+func (f *fakeAS) token(name string) string {
+	if f.mode == "" {
+		return name
+	}
+	claims, _ := json.Marshal(map[string]any{"sub": "agt_1", "endpoint_mode": f.mode, "jti": name})
+	return "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(claims) + ".sig"
 }
 
 func (f *fakeAS) verify(r *http.Request) (map[string]any, error) {
@@ -97,7 +108,7 @@ func (f *fakeAS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.current = "ccrt_1"
-		write(200, map[string]any{"access_token": "at_device", "token_type": "DPoP", "expires_in": 300, "refresh_token": f.current})
+		write(200, map[string]any{"access_token": f.token("at_device"), "token_type": "DPoP", "expires_in": 300, "refresh_token": f.current})
 	case runtimeproto.RefreshGrant:
 		f.refreshes++
 		presented := r.Form.Get("refresh_token")
@@ -111,7 +122,7 @@ func (f *fakeAS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(400, map[string]any{"error": "invalid_grant", "contro1_reason": "refresh_reuse", "remediation": map[string]any{"code": "CONNECTION_NOT_ACTIVE", "next_step": "Connect this computer again."}})
 			return
 		}
-		write(200, map[string]any{"access_token": fmt.Sprintf("at_%s_%d", r.Form.Get("resource"), f.refreshes), "token_type": "DPoP", "expires_in": 300, "refresh_token": next})
+		write(200, map[string]any{"access_token": f.token(fmt.Sprintf("at_%s_%d", r.Form.Get("resource"), f.refreshes)), "token_type": "DPoP", "expires_in": 300, "refresh_token": next})
 	default:
 		write(400, map[string]any{"error": "unsupported_grant_type"})
 	}
@@ -291,4 +302,60 @@ func TestAuthorizeSetsHeaders(t *testing.T) {
 		t.Fatalf("headers %v", req.Header)
 	}
 	_ = time.Second
+}
+
+// The mode the server writes into each token is followed in both directions,
+// and only a change is reported: the mapping file and doctor then say what
+// the server says without an extra request.
+func TestTokensCarryTheLiveModeBothWays(t *testing.T) {
+	p, as, store := setup(t)
+	var seen []string
+	p.ModeObserved = func(localID, mode string) {
+		seen = append(seen, localID+"="+mode)
+		_, _ = store.UpdateState(func(st *brokerstore.State) error {
+			st.Enrollments[0].EndpointMode = mode
+			return nil
+		})
+	}
+	as.mode = runtimeproto.ModeApplications
+	activate(t, p, as)
+	st, _ := store.LoadState()
+	if st.Enrollments[0].EndpointMode != runtimeproto.ModeApplications {
+		t.Fatalf("activation records the approved mode: %q", st.Enrollments[0].EndpointMode)
+	}
+
+	ctx := context.Background()
+	expireCache(p)
+	if _, err := p.AccessToken(ctx, "loc_1", runtimeproto.ResourceAPI); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 0 {
+		t.Fatalf("an unchanged mode is not reported: %v", seen)
+	}
+
+	as.mu.Lock()
+	as.mode = runtimeproto.ModeApprovalsOnly
+	as.mu.Unlock()
+	expireCache(p)
+	if _, err := p.AccessToken(ctx, "loc_1", runtimeproto.ResourceAPI); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "loc_1="+runtimeproto.ModeApprovalsOnly {
+		t.Fatalf("a narrowed connection is reported: %v", seen)
+	}
+
+	as.mu.Lock()
+	as.mode = runtimeproto.ModeApplications
+	as.mu.Unlock()
+	expireCache(p)
+	if _, err := p.AccessToken(ctx, "loc_1", runtimeproto.ResourceMCP); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[1] != "loc_1="+runtimeproto.ModeApplications {
+		t.Fatalf("a widened connection is reported: %v", seen)
+	}
+
+	if TokenEndpointMode("at_opaque") != "" || TokenEndpointMode("a.!!!.c") != "" {
+		t.Fatal("a token without a readable mode says nothing")
+	}
 }

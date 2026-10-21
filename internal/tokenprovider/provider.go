@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -95,6 +96,11 @@ type Provider struct {
 	HTTP   *http.Client
 	APIURL string
 	Now    func() time.Time
+	// ModeObserved is told when a token the server just issued carries a
+	// different endpoint mode than this computer has recorded. The broker
+	// rewrites the connection's mode and its platform mapping. It is called
+	// after the connection's token lock is released.
+	ModeObserved func(localID, mode string)
 
 	mu       sync.Mutex
 	entries  map[string]*entry
@@ -170,6 +176,14 @@ func (p *Provider) Invalidate(localID, resource string) {
 // AccessToken returns a valid token for (connection, resource).
 func (p *Provider) AccessToken(ctx context.Context, localID, resource string) (string, error) {
 	e := p.entryFor(localID)
+	var observed string
+	// Registered before the unlock, so it runs after it: the callback writes
+	// state and files and must not hold up other callers of this connection.
+	defer func() {
+		if observed != "" && p.ModeObserved != nil {
+			p.ModeObserved(localID, observed)
+		}
+	}()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if c, ok := e.cache[resource]; ok && p.Now().Add(refreshMargin).Before(c.expires) {
@@ -222,7 +236,47 @@ func (p *Provider) AccessToken(ctx context.Context, localID, resource string) (s
 	}
 	_ = p.Store.ClearJournal(localID)
 	e.cache[resource] = cached{token: resp.AccessToken, expires: p.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)}
+	if mode := TokenEndpointMode(resp.AccessToken); mode != "" && mode != enr.EndpointMode {
+		observed = mode
+	}
 	return resp.AccessToken, nil
+}
+
+/*
+TokenEndpointMode reads the endpoint mode the server wrote into an access
+token, or "" when the token does not carry one.
+
+WHY HERE. The local mode was written once, at connect, and afterwards changed
+only when an application call happened to need it, and only ever wider. So
+`contro1 doctor` kept printing "Approvals only" from the mapping file after the
+owner had allowed applications, and an owner who narrowed a connection back
+left a mapping that still claimed applications. The server already says the
+live mode in every token it issues, and it issues a new one exactly when the
+mode can have changed: a mode change moves scope_version, which makes the
+server refuse every older token, and the broker refreshes. Reading the claim
+at that moment follows the server both ways, without a single extra request.
+
+The signature is not checked, and does not need to be: the token came straight
+from the token endpoint over TLS, and the mode only decides which calls the
+local endpoint forwards. The server authorizes every one of them against the
+live mode regardless.
+*/
+func TokenEndpointMode(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		EndpointMode string `json:"endpoint_mode"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || !runtimeproto.ValidMode(claims.EndpointMode) {
+		return ""
+	}
+	return claims.EndpointMode
 }
 
 func stateForKind(kind string) string {
@@ -478,6 +532,11 @@ func (p *Provider) PollOnce(ctx context.Context, localID string) error {
 		en.ApprovalExpires = resp.ApprovalExpiresAt
 		en.LastErrorCode = ""
 		en.AgentID = firstNonEmpty(resp.AgentID, en.AgentID)
+		// The owner may have chosen a mode while approving; the first mapping
+		// is written from this record, so it should say what was approved.
+		if mode := TokenEndpointMode(resp.AccessToken); mode != "" {
+			en.EndpointMode = mode
+		}
 	})
 	e.cache[runtimeproto.ResourceAPI] = cached{token: resp.AccessToken, expires: p.Now().Add(time.Duration(resp.ExpiresIn) * time.Second)}
 	return nil

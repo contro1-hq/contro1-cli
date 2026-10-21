@@ -31,6 +31,39 @@ type fakeEnv struct {
 	liveMode                      string
 	leaseStored                   bool
 	leaseExposed                  []string
+	// The MCP server connect installs. mcpName empty is a platform where it
+	// does not (NanoClaw), which keeps the older applications checks.
+	mcpName      string
+	mcpTools     int
+	mcpProbeErr  error
+	isolation    []IsolationIssue
+	isolationErr error
+	config       *ConfigState
+}
+
+func (f *fakeEnv) McpServerName(_, subject string) string {
+	if f.mcpName == "" {
+		return ""
+	}
+	return strings.ReplaceAll(f.mcpName, "<id>", subject)
+}
+
+func (f *fakeEnv) McpProbe(context.Context, runtimeproto.MappingEntry) (int, error) {
+	return f.mcpTools, f.mcpProbeErr
+}
+
+func (f *fakeEnv) McpIsolation(context.Context, string, []string) ([]IsolationIssue, error) {
+	if f.isolationErr != nil {
+		return nil, f.isolationErr
+	}
+	return f.isolation, nil
+}
+
+func (f *fakeEnv) ConfigStatus(context.Context, string) (ConfigState, error) {
+	if f.config == nil {
+		return ConfigState{}, ErrNotApplicable
+	}
+	return *f.config, nil
 }
 
 func (f *fakeEnv) LeaseExposure(context.Context, string, string) (bool, []string, error) {
@@ -406,5 +439,152 @@ func TestLeaseReceivedByAnotherAgentIsBlocked(t *testing.T) {
 	}
 	if r.State != "blocked" {
 		t.Fatalf("report state: %s", r.State)
+	}
+}
+
+// An OpenClaw host as connect leaves it: two agents, each with its own server.
+func openClawHost() *fakeEnv {
+	env := healthy()
+	env.mapping.Platform = "openclaw"
+	env.mcpName = "contro1-<id>"
+	env.mcpTools = 12
+	env.mcpServers = []McpServerConfig{
+		{Name: "contro1-group-a", Command: "/usr/local/bin/contro1", Args: []string{"mcp", "serve", "--agent", "group-a"}},
+		{Name: "contro1-group-b", Command: "/usr/local/bin/contro1", Args: []string{"mcp", "serve", "--agent", "group-b"}},
+	}
+	env.approverErr = errors.New("not reported by this platform")
+	return env
+}
+
+func TestMcpServerChecksForAPlatformConnectInstallsOn(t *testing.T) {
+	env := openClawHost()
+	r := Run(context.Background(), env, "openclaw")
+	if c, _ := findCheck(r, "mcp_server:group-a"); c.Status != runtimeproto.CheckOK {
+		t.Fatalf("an entry pinned to this agent passes: %+v", c)
+	}
+	if c, _ := findCheck(r, "mcp_live:group-a"); c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "12 actions available") {
+		t.Fatalf("the live call is reported with what it found: %+v", c)
+	}
+	if _, ok := findCheck(r, "applications:group-a"); ok {
+		t.Fatal("the older applications check is for platforms connect does not set up")
+	}
+	if r.State != "connected" {
+		t.Fatalf("state: %s %+v", r.State, r.Checks)
+	}
+
+	// Missing: the agent has no way to Contro1's tools.
+	env = openClawHost()
+	env.mcpServers = env.mcpServers[1:]
+	c, _ := findCheck(Run(context.Background(), env, "openclaw"), "mcp_server:group-a")
+	if c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "contro1-group-a") || c.NextCommand != "contro1 connect openclaw" {
+		t.Fatalf("a missing entry names itself and the fix: %+v", c)
+	}
+
+	// Present but acting as another agent.
+	env = openClawHost()
+	env.mcpServers[0].Args = []string{"mcp", "serve", "--agent", "group-b"}
+	if c, _ := findCheck(Run(context.Background(), env, "openclaw"), "mcp_server:group-a"); c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "does not act as this agent") {
+		t.Fatalf("an entry for another agent is not this agent's: %+v", c)
+	}
+
+	// The live call fails: said in its own words.
+	env = openClawHost()
+	env.mcpProbeErr = errors.New("MCP initialize failed: This computer is not connected")
+	if c, _ := findCheck(Run(context.Background(), env, "openclaw"), "mcp_live:group-a"); c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "not connected") {
+		t.Fatalf("a failed live call is repairable with its reason: %+v", c)
+	}
+}
+
+// One agent acting as another is exposure: blocked, never "repairable".
+func TestMcpIsolationFindings(t *testing.T) {
+	env := openClawHost()
+	r := Run(context.Background(), env, "openclaw")
+	if c, ok := findCheck(r, "mcp_isolation"); !ok || c.Status != runtimeproto.CheckOK {
+		t.Fatalf("rules in place pass: %+v", c)
+	}
+
+	env = openClawHost()
+	env.isolation = []IsolationIssue{
+		{Agent: "group-b", Exposure: true, Message: "Agent group-b can use contro1-group-a__*, which act as other agents."},
+		{Agent: "group-a", Message: "Agent group-a has a tools.allow list without contro1-group-a__*."},
+	}
+	r = Run(context.Background(), env, "openclaw")
+	if c, _ := findCheck(r, "mcp_isolation:group-b"); c.Status != runtimeproto.CheckBlocked || c.NextCommand != "contro1 connect openclaw" {
+		t.Fatalf("exposure is blocked with the command that writes the rules: %+v", c)
+	}
+	if c, _ := findCheck(r, "mcp_isolation:group-a"); c.Status != runtimeproto.CheckRepairable {
+		t.Fatalf("an agent that lost its own server is broken, not exposed: %+v", c)
+	}
+	if r.State != "blocked" {
+		t.Fatalf("state: %s", r.State)
+	}
+
+	// Rules that cannot be read on a host with several agents are not assumed fine.
+	env = openClawHost()
+	env.isolationErr = errors.New("openclaw.json is not plain JSON")
+	if c, _ := findCheck(Run(context.Background(), env, "openclaw"), "mcp_isolation"); c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "contro1-<id>__*") {
+		t.Fatalf("unreadable rules are reported with what to check: %+v", c)
+	}
+
+	// Claude Code has nothing to isolate and says nothing about it.
+	env = openClawHost()
+	env.isolationErr = ErrNotApplicable
+	if _, ok := findCheck(Run(context.Background(), env, "claude-code"), "mcp_isolation"); ok {
+		t.Fatal("not applicable is not a finding")
+	}
+}
+
+// OpenClaw keeps running the last configuration it accepted, so one it rejects
+// means the Contro1 servers never apply while the gateway looks healthy.
+func TestARejectedPlatformConfigurationIsReported(t *testing.T) {
+	env := openClawHost()
+	env.config = &ConfigState{Valid: false, Problem: `agents: Unrecognized key: "list"`}
+	c, ok := findCheck(Run(context.Background(), env, "openclaw"), "platform_config_valid")
+	if !ok || c.Status != runtimeproto.CheckRepairable || !strings.Contains(c.Message, "Unrecognized key") || c.NextCommand != "openclaw config validate" {
+		t.Fatalf("a rejected configuration names the problem and the command: %+v", c)
+	}
+
+	env.config = &ConfigState{Valid: true}
+	if c, _ := findCheck(Run(context.Background(), env, "openclaw"), "platform_config_valid"); c.Status != runtimeproto.CheckOK {
+		t.Fatalf("a valid configuration passes: %+v", c)
+	}
+
+	env.config = nil
+	if _, ok := findCheck(Run(context.Background(), env, "openclaw"), "platform_config_valid"); ok {
+		t.Fatal("a platform that cannot say is not a finding")
+	}
+	if _, ok := findCheck(Run(context.Background(), env, "openclaw"), "gateway_current"); ok {
+		t.Fatal("OpenClaw hot reloads MCP and agents; there is no restart check")
+	}
+}
+
+// A Claude Code that only uses the approval hook was fine before connect
+// installed the MCP server, and still is.
+func TestClaudeCodeWithoutTheMcpServerIsNotAFailure(t *testing.T) {
+	t.Setenv("CONTRO1_PLATFORMS_DIR", t.TempDir())
+	env := openClawHost()
+	env.mapping.Platform = "claude-code"
+	env.mcpName = "contro1"
+	env.mcpServers = nil
+	env.mcpProbeErr = errors.New("an older service has no /mcp")
+	r := Run(context.Background(), env, "claude-code")
+	c, ok := findCheck(r, "mcp_server:group-a")
+	if !ok || c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "MCP not set up") || c.NextCommand != "contro1 connect claude-code" {
+		t.Fatalf("informational, with the command: %+v", c)
+	}
+	if _, probed := findCheck(r, "mcp_live:group-a"); probed {
+		t.Fatal("no live check for a server that is not set up")
+	}
+	if r.State != "connected" {
+		t.Fatalf("doctor stays green: %s %+v", r.State, r.Checks)
+	}
+
+	// The docs' local entry without --agent acts as the only agent here.
+	env.mcpServers = []McpServerConfig{{Name: "contro1", Command: "contro1", Args: []string{"mcp", "serve"}}}
+	env.mapping.Entries = env.mapping.Entries[:1]
+	env.discovered = []string{"group-a"}
+	env.mcpProbeErr = nil
+	if c, _ := findCheck(Run(context.Background(), env, "claude-code"), "mcp_server:group-a"); c.Status != runtimeproto.CheckOK || strings.Contains(c.Message, "not this agent") {
+		t.Fatalf("a working unpinned entry is not repair-needed: %+v", c)
 	}
 }

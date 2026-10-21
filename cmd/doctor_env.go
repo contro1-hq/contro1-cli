@@ -169,28 +169,14 @@ nothing, because somebody would go and fix the wrong thing.
 */
 func (e *systemDoctorEnv) McpServers(ctx context.Context, platform, subject string) ([]doctor.McpServerConfig, error) {
 	if platform != "nanoclaw" {
-		return nil, errors.New("not reported by this platform")
+		return e.mcpServersFromPlatform(ctx)
 	}
-	out, err := platforms.ExecRunner(ctx, nclBinary(), "groups", "config", "get", "--id", subject, "--json")
+	found, err := nanoclawMcpServers(ctx, subject)
 	if err != nil {
 		return nil, err
 	}
-	var frame struct {
-		OK   bool `json:"ok"`
-		Data struct {
-			McpServers []struct {
-				Name    string   `json:"name"`
-				Command string   `json:"command"`
-				Args    []string `json:"args"`
-				URL     string   `json:"url"`
-			} `json:"mcp_servers"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(out, &frame); err != nil || !frame.OK {
-		return nil, errors.New("could not read the platform's MCP configuration")
-	}
-	servers := make([]doctor.McpServerConfig, 0, len(frame.Data.McpServers))
-	for _, s := range frame.Data.McpServers {
+	servers := make([]doctor.McpServerConfig, 0, len(found))
+	for _, s := range found {
 		servers = append(servers, doctor.McpServerConfig{Name: s.Name, Command: s.Command, Args: s.Args, URL: s.URL})
 	}
 	return servers, nil
@@ -335,4 +321,72 @@ func stringField(row map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// The MCP server connect installs (Claude Code, OpenClaw)
+// ---------------------------------------------------------------------------
+
+func (e *systemDoctorEnv) inspector() (platforms.McpInspector, bool) {
+	i, ok := e.adapter.(platforms.McpInspector)
+	return i, ok
+}
+
+func (e *systemDoctorEnv) McpServerName(_, subject string) string {
+	if i, ok := e.inspector(); ok {
+		return i.McpServerName(subject)
+	}
+	return ""
+}
+
+func (e *systemDoctorEnv) McpProbe(ctx context.Context, entry runtimeproto.MappingEntry) (int, error) {
+	return probeAgentMcp(ctx, entry)
+}
+
+func (e *systemDoctorEnv) McpIsolation(ctx context.Context, _ string, subjects []string) ([]doctor.IsolationIssue, error) {
+	i, ok := e.inspector()
+	if !ok {
+		return nil, doctor.ErrNotApplicable
+	}
+	issues, err := i.McpIsolation(ctx, subjects)
+	if errors.Is(err, platforms.ErrNotReported) {
+		return nil, doctor.ErrNotApplicable
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]doctor.IsolationIssue, 0, len(issues))
+	for _, is := range issues {
+		out = append(out, doctor.IsolationIssue{Agent: is.Agent, Message: is.Message, Exposure: is.Exposure})
+	}
+	return out, nil
+}
+
+func (e *systemDoctorEnv) ConfigStatus(ctx context.Context, _ string) (doctor.ConfigState, error) {
+	i, ok := e.inspector()
+	if !ok {
+		return doctor.ConfigState{}, doctor.ErrNotApplicable
+	}
+	state, err := i.ConfigStatus(ctx)
+	if err != nil {
+		return doctor.ConfigState{}, doctor.ErrNotApplicable
+	}
+	return doctor.ConfigState{Valid: state.Valid, Problem: state.Problem}, nil
+}
+
+// mcpServersFromPlatform is McpServers for a platform that reports its own.
+func (e *systemDoctorEnv) mcpServersFromPlatform(ctx context.Context) ([]doctor.McpServerConfig, error) {
+	i, ok := e.inspector()
+	if !ok {
+		return nil, errors.New("not reported by this platform")
+	}
+	servers, err := i.McpServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]doctor.McpServerConfig, 0, len(servers))
+	for _, s := range servers {
+		out = append(out, doctor.McpServerConfig{Name: s.Name, Command: s.Command, Args: s.Args, URL: s.URL})
+	}
+	return out, nil
 }

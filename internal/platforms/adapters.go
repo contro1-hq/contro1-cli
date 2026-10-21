@@ -14,7 +14,8 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// OpenClaw (UNVERIFIED discovery and config location)
+// OpenClaw (discovery and config location checked against OpenClaw 2026.10.5:
+// docs/cli/agents.md, src/config/paths.ts, src/config/zod-schema.agents.ts)
 // ---------------------------------------------------------------------------
 
 type openClaw struct{ opts Options }
@@ -28,11 +29,16 @@ func (o *openClaw) bin() string {
 	return "openclaw"
 }
 
-// Discover tries `openclaw agents list --json`, then the config file's
-// agents.list[].id, then explicit --agent flags.
+// Discover tries `openclaw agents list --json`, then the config file's agents,
+// then explicit --agent flags.
+//
+// The file is the one OpenClaw reads (OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR,
+// OPENCLAW_HOME, profiles; see openClawConfigPath). Agents are keyed under
+// agents.entries (src/config/zod-schema.agents.ts); agents.list is the older
+// shape, still read here so an older install is found. The instance digest
+// keeps the original path, so existing connections keep their instance.
 func (o *openClaw) Discover(ctx context.Context) (Instance, []Subject, error) {
-	configPath := filepath.Join(o.opts.Home, ".openclaw", "openclaw.json")
-	inst := Instance{Label: "OpenClaw", Digest: digest("openclaw", configPath)}
+	inst := Instance{Label: "OpenClaw", Digest: digest("openclaw", filepath.Join(o.opts.Home, ".openclaw", "openclaw.json"))}
 	if subjects := explicit(o.opts.Agents); len(subjects) > 0 {
 		return inst, subjects, nil
 	}
@@ -41,9 +47,12 @@ func (o *openClaw) Discover(ctx context.Context) (Instance, []Subject, error) {
 			return inst, subjects, nil
 		}
 	}
-	if raw, err := os.ReadFile(configPath); err == nil {
+	if raw, err := os.ReadFile(o.openClawConfigPath()); err == nil {
 		var cfg struct {
 			Agents struct {
+				Entries map[string]struct {
+					Name string `json:"name"`
+				} `json:"entries"`
 				List []struct {
 					ID   string `json:"id"`
 					Name string `json:"name"`
@@ -52,8 +61,11 @@ func (o *openClaw) Discover(ctx context.Context) (Instance, []Subject, error) {
 		}
 		if json.Unmarshal(raw, &cfg) == nil {
 			var subjects []Subject
+			for _, id := range sortedKeys(cfg.Agents.Entries) {
+				subjects = append(subjects, Subject{ID: id, Display: firstNonEmpty(cfg.Agents.Entries[id].Name, id)})
+			}
 			for _, a := range cfg.Agents.List {
-				if a.ID != "" {
+				if a.ID != "" && !hasSubject(subjects, a.ID) {
 					subjects = append(subjects, Subject{ID: a.ID, Display: firstNonEmpty(a.Name, a.ID)})
 				}
 			}
@@ -63,6 +75,15 @@ func (o *openClaw) Discover(ctx context.Context) (Instance, []Subject, error) {
 		}
 	}
 	return inst, nil, errors.New("no OpenClaw agents found; pass --agent <id> for each agent")
+}
+
+func hasSubject(subjects []Subject, id string) bool {
+	for _, s := range subjects {
+		if s.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func parseAgentList(out []byte) []Subject {
@@ -257,17 +278,102 @@ func (n *nanoClaw) SafeTest() string {
 // Claude Code
 // ---------------------------------------------------------------------------
 
-type claudeCode struct{ opts Options }
+type claudeCode struct {
+	opts Options
+	// Test seams; nil means this computer's own.
+	hostname func() (string, error)
+	machine  *machineReaders
+	// mappingPath is where an existing Claude Code mapping is looked for.
+	mappingPath string
+}
 
 func (c *claudeCode) Name() string { return "claude-code" }
 
-func (c *claudeCode) Discover(context.Context) (Instance, []Subject, error) {
-	host, _ := os.Hostname()
-	subject := "claude-code@" + strings.ToLower(firstNonEmpty(host, "computer"))
-	if s := explicit(c.opts.Agents); len(s) > 0 {
-		return Instance{Label: "Claude Code", Digest: digest("claude-code", host)}, s, nil
+func (c *claudeCode) Discover(ctx context.Context) (Instance, []Subject, error) {
+	hostname := c.hostname
+	if hostname == nil {
+		hostname = os.Hostname
 	}
-	return Instance{Label: "Claude Code", Digest: digest("claude-code", host)}, []Subject{{ID: subject, Display: "Claude Code on " + firstNonEmpty(host, "this computer")}}, nil
+	host, _ := hostname()
+	subject, instanceDigest := c.identity(ctx, host)
+	instance := Instance{Label: "Claude Code", Digest: instanceDigest}
+	if s := explicit(c.opts.Agents); len(s) > 0 {
+		return instance, s, nil
+	}
+	return instance, []Subject{{ID: subject, Display: "Claude Code on " + firstNonEmpty(host, "this computer")}}, nil
+}
+
+/*
+identity is the subject and instance digest Claude Code on this computer
+connects as.
+
+New connections use the machine id (see machineIdentity), so the subject stays
+the same whatever the network calls the computer. The hostname is kept for the
+display name only, where a person recognises it.
+
+EXISTING CONNECTIONS ARE NEVER MOVED. Somebody connected before this change has
+an agent whose subject is "claude-code@<hostname>", with its owner, approvals
+and access attached. Switching them to the new subject would create exactly the
+duplicate agent this change exists to stop. So when this computer already has
+a Claude Code mapping, its subject (and the instance digest it was connected
+with) is reused:
+
+ 1. an entry with the machine-id subject, when one exists;
+ 2. else an entry with today's hostname subject;
+ 3. else the one hostname-style entry there is, which is the case of a Mac
+    whose hostname changed since it was connected.
+
+Several old entries and none of them matching is a computer that already has
+duplicates; nothing here can tell which one is right, so the machine-id
+subject is used and the person merges the rest in Contro1.
+
+When the machine id cannot be read at all, the old hostname subject is used, so
+connecting never fails for want of one.
+*/
+func (c *claudeCode) identity(ctx context.Context, host string) (subject, instanceDigest string) {
+	legacy := "claude-code@" + strings.ToLower(firstNonEmpty(host, "computer"))
+	stable := ""
+	stableDigest := ""
+	readers := machineReaders{runner: c.opts.Runner}
+	if c.machine != nil {
+		readers = *c.machine
+	}
+	if id, err := readers.read(ctx); err == nil {
+		key := machineKey(id)
+		stable = "claude-code@" + key
+		stableDigest = digest("claude-code", key)
+	}
+
+	path := c.mappingPath
+	if path == "" && c.opts.PlatformsDir != "" {
+		path = filepath.Join(c.opts.PlatformsDir, "claude-code.json")
+	}
+	if path == "" {
+		path = filepath.Join(PlatformsDir(), "claude-code.json")
+	}
+	if m, err := ReadMapping(path); err == nil && m.Platform == "claude-code" {
+		var hostStyle []string
+		has := map[string]bool{}
+		for _, e := range m.Entries {
+			has[e.PlatformSubject] = true
+			if strings.HasPrefix(e.PlatformSubject, "claude-code@") && e.PlatformSubject != stable {
+				hostStyle = append(hostStyle, e.PlatformSubject)
+			}
+		}
+		existingDigest := m.PlatformInstanceDigest
+		switch {
+		case stable != "" && has[stable]:
+			return stable, firstNonEmpty(existingDigest, stableDigest)
+		case has[legacy]:
+			return legacy, firstNonEmpty(existingDigest, digest("claude-code", host))
+		case len(hostStyle) == 1 && len(m.Entries) == 1:
+			return hostStyle[0], firstNonEmpty(existingDigest, digest("claude-code", host))
+		}
+	}
+	if stable != "" {
+		return stable, stableDigest
+	}
+	return legacy, digest("claude-code", host)
 }
 
 func (c *claudeCode) envPath() string {

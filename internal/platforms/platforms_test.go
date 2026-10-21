@@ -463,3 +463,164 @@ func TestNanoClawApplicationsRefusesWithoutAnAddress(t *testing.T) {
 		t.Fatalf("nothing may run before the address is known, ran %d", ran)
 	}
 }
+
+// status.json is the broker's health copy, not a mapping. Reading it as one
+// made every ambiguity message end with a digest failure that looked like
+// tampering on a computer where nothing was wrong.
+func TestStatusFileIsNotAMapping(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CONTRO1_PLATFORMS_DIR", dir)
+	writeMapping(t, dir, "openclaw", []runtimeproto.MappingEntry{
+		entry("main", "agt_main", "unix:///run/contro1/ep/main.sock"),
+		entry("dash", "agt_dash", "unix:///run/contro1/ep/dash.sock"),
+	})
+	_ = os.WriteFile(filepath.Join(dir, "status.json"), []byte(`{"broker_version":"0.2.20","pid":42,"enrollments":[]}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "notes.json"), []byte(`{"anything":"else"}`), 0o644)
+
+	connections, problems := LocalConnections()
+	if len(connections) != 2 || len(problems) != 0 {
+		t.Fatalf("only mapping files are read: %d connections, problems %v", len(connections), problems)
+	}
+	_, err := SelectLocalConnection("")
+	if err == nil || strings.Contains(err.Error(), "could not be read") || strings.Contains(err.Error(), "digest") {
+		t.Fatalf("ambiguity must not mention a damaged file: %v", err)
+	}
+}
+
+// CLAUDECODE is inherited by everything a Claude Code session starts (Codex,
+// an OpenClaw gateway). It may word a suggestion, never pick an identity.
+func TestTheCallingPlatformNeverPicksAConnection(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CONTRO1_PLATFORMS_DIR", dir)
+	t.Setenv("CLAUDECODE", "1")
+	writeMapping(t, dir, "openclaw", []runtimeproto.MappingEntry{
+		entry("main", "agt_main", "unix:///run/contro1/ep/main.sock"),
+	})
+	writeMapping(t, dir, "claude-code", []runtimeproto.MappingEntry{entry("claude-code@abc", "agt_cc", "unix:///run/contro1/ep/cc.sock")})
+
+	if got := ClientPlatform(func(k string) string { return map[string]string{"CLAUDECODE": "1"}[k] }); got != "claude-code" {
+		t.Fatalf("CLAUDECODE still names Claude Code for messages: %q", got)
+	}
+	var ambiguous *AmbiguousConnectionError
+	if _, err := SelectLocalConnection(""); !errors.As(err, &ambiguous) {
+		t.Fatalf("two connections and none named stay ambiguous, whoever started us: %v", err)
+	}
+	if got, err := SelectLocalConnection("main"); err != nil || got.AgentID != "agt_main" {
+		t.Fatalf("a named agent always wins: %+v %v", got, err)
+	}
+}
+
+func writeClaudeMapping(t *testing.T, path, instanceDigest string, subjects ...string) {
+	t.Helper()
+	var entries []runtimeproto.MappingEntry
+	for i, s := range subjects {
+		entries = append(entries, entry(s, "agt_"+string(rune('a'+i)), "unix:///run/contro1/ep/cc.sock"))
+	}
+	raw, _ := json.Marshal(runtimeproto.MappingFile{
+		SchemaVersion: runtimeproto.SchemaVersion, Platform: "claude-code", PlatformInstanceDigest: instanceDigest,
+		Digest: runtimeproto.MappingDigest(entries), Entries: entries,
+	})
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The same Mac on two networks is one Claude Code. The hostname is what the
+// network calls it ("mbp.local", then "mbp.lan"), so it names the agent for a
+// person and never identifies it.
+func TestClaudeCodeIdentityIsTheMachineNotTheNetwork(t *testing.T) {
+	mac := machineReaders{goos: "darwin", runner: fakeRunner(map[string]string{
+		"ioreg -rd1 -c IOPlatformExpertDevice": `+-o J314sAP  <class IOPlatformExpertDevice>
+    {
+      "IOPlatformSerialNumber" = "C02XXXXXX"
+      "IOPlatformUUID" = "4C4C4544-0042-3510-8051-B4C04F4D4E32"
+    }`,
+	})}
+	discover := func(host string) Subject {
+		t.Helper()
+		c := &claudeCode{machine: &mac, hostname: func() (string, error) { return host, nil }, mappingPath: filepath.Join(t.TempDir(), "none.json")}
+		_, subjects, err := c.Discover(context.Background())
+		if err != nil || len(subjects) != 1 {
+			t.Fatalf("discover: %+v %v", subjects, err)
+		}
+		return subjects[0]
+	}
+	home, office := discover("MBP.local"), discover("mbp.lan")
+	if home.ID != office.ID {
+		t.Fatalf("a network change must not change the agent: %q vs %q", home.ID, office.ID)
+	}
+	if strings.Contains(home.ID, "4c4c4544") || strings.Contains(strings.ToLower(home.ID), "mbp") {
+		t.Fatalf("the subject carries a hash of the machine id, not the id or the hostname: %q", home.ID)
+	}
+	if home.Display != "Claude Code on MBP.local" {
+		t.Fatalf("the display name still names the computer: %q", home.Display)
+	}
+
+	linux := machineReaders{goos: "linux", readFile: func(p string) ([]byte, error) {
+		if p == "/etc/machine-id" {
+			return []byte("b08dfa6083e7567a1921a715000001fb\n"), nil
+		}
+		return nil, os.ErrNotExist
+	}}
+	windows := machineReaders{goos: "windows", runner: fakeRunner(map[string]string{
+		`reg query HKLM\SOFTWARE\Microsoft\Cryptography /v MachineGuid`: "\r\n" + `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography` + "\r\n    MachineGuid    REG_SZ    8f2c1d4e-1111-2222-3333-444455556666\r\n",
+	})}
+	for name, r := range map[string]machineReaders{"linux": linux, "windows": windows} {
+		id, err := r.read(context.Background())
+		if err != nil || id == "" {
+			t.Fatalf("%s machine id: %q %v", name, id, err)
+		}
+	}
+	if id, _ := windows.read(context.Background()); id != "8f2c1d4e-1111-2222-3333-444455556666" {
+		t.Fatalf("windows MachineGuid parsed: %q", id)
+	}
+
+	// No machine id: the old hostname subject, so connecting still works.
+	none := machineReaders{goos: "linux", readFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }}
+	c := &claudeCode{machine: &none, hostname: func() (string, error) { return "Box", nil }, mappingPath: filepath.Join(t.TempDir(), "none.json")}
+	if _, subjects, _ := c.Discover(context.Background()); subjects[0].ID != "claude-code@box" {
+		t.Fatalf("fallback is the hostname subject: %+v", subjects)
+	}
+}
+
+// Somebody connected before the machine id existed keeps their agent. Moving
+// them to a new subject would create the duplicate this change is for.
+func TestClaudeCodeKeepsAnExistingHostnameConnection(t *testing.T) {
+	mac := machineReaders{goos: "darwin", runner: fakeRunner(map[string]string{
+		"ioreg -rd1 -c IOPlatformExpertDevice": `"IOPlatformUUID" = "4C4C4544-0042-3510-8051-B4C04F4D4E32"`,
+	})}
+	path := filepath.Join(t.TempDir(), "claude-code.json")
+	writeClaudeMapping(t, path, "sha256:olddigest", "claude-code@mbp.local")
+	discover := func(host string) (Instance, Subject) {
+		t.Helper()
+		c := &claudeCode{machine: &mac, hostname: func() (string, error) { return host, nil }, mappingPath: path}
+		instance, subjects, err := c.Discover(context.Background())
+		if err != nil || len(subjects) != 1 {
+			t.Fatalf("discover: %+v %v", subjects, err)
+		}
+		return instance, subjects[0]
+	}
+
+	instance, same := discover("mbp.local")
+	if same.ID != "claude-code@mbp.local" || instance.Digest != "sha256:olddigest" {
+		t.Fatalf("the existing subject and instance are reused: %+v %+v", same, instance)
+	}
+	// The hostname changed since; the one existing connection is still this Mac.
+	instance, moved := discover("mbp.lan")
+	if moved.ID != "claude-code@mbp.local" || instance.Digest != "sha256:olddigest" {
+		t.Fatalf("a renamed Mac keeps its connection: %+v %+v", moved, instance)
+	}
+
+	// Already connected with the machine id: that one, whatever else is there.
+	stable := "claude-code@" + machineKey("4c4c4544-0042-3510-8051-b4c04f4d4e32")
+	writeClaudeMapping(t, path, "sha256:new", "claude-code@mbp.local", stable)
+	if _, got := discover("mbp.lan"); got.ID != stable {
+		t.Fatalf("the machine-id subject wins when it exists: %q", got.ID)
+	}
+	// Two old duplicates and neither matching: nothing to tell them apart, so
+	// the machine id.
+	writeClaudeMapping(t, path, "sha256:dup", "claude-code@mbp.local", "claude-code@mbp.lan")
+	if _, got := discover("mbp-2.home"); got.ID != stable {
+		t.Fatalf("ambiguous old entries fall to the machine id: %q", got.ID)
+	}
+}

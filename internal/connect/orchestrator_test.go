@@ -476,3 +476,133 @@ func TestConnectSaysWhatItDidNotFinish(t *testing.T) {
 		t.Fatalf("a finished platform must not invent work: %q %+v", ns2.Message, ns2.Checks)
 	}
 }
+
+// ---- the MCP step --------------------------------------------------------------
+
+type fakeMcp struct {
+	previewedFor []string
+	installs     int
+	outcome      platforms.McpOutcome
+	installErr   error
+	probeErr     map[string]error
+	tools        int
+}
+
+func (f *fakeMcp) Changes(_ context.Context, subjects []string) []platforms.Change {
+	f.previewedFor = subjects
+	return []platforms.Change{{Kind: "mcp", Description: "Add the MCP server contro1-main to OpenClaw", After: "openclaw mcp add contro1-main --command /usr/local/bin/contro1 --arg mcp --arg serve --arg --agent --arg main"}}
+}
+
+func (f *fakeMcp) Install(context.Context, *runtimeproto.MappingFile, *platforms.Journal) (platforms.McpOutcome, error) {
+	f.installs++
+	return f.outcome, f.installErr
+}
+
+func (f *fakeMcp) Probe(_ context.Context, e runtimeproto.MappingEntry) (int, error) {
+	if err := f.probeErr[e.PlatformSubject]; err != nil {
+		return 0, err
+	}
+	return f.tools, nil
+}
+
+// The MCP server is one of the changes the person confirms, not a surprise
+// after they did.
+func TestThePreviewIncludesTheMcpServer(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	mcp := &fakeMcp{}
+	o.Mcp = mcp
+	ns := o.Run(context.Background(), base())
+	if ns.State != runtimeproto.StateNeedsLocalConfirmation {
+		t.Fatalf("%+v", ns)
+	}
+	found := false
+	for _, c := range ns.Checks {
+		if strings.Contains(c.Message, "openclaw mcp add contro1-main") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the MCP command is in the preview: %+v", ns.Checks)
+	}
+	if mcp.installs != 0 || api.prepares != 0 {
+		t.Fatal("nothing is installed before confirmation")
+	}
+	if strings.Join(mcp.previewedFor, ",") != "main,research" {
+		t.Fatalf("previewed for every agent being connected: %v", mcp.previewedFor)
+	}
+}
+
+func TestConnectEndsWithTheMcpServerAndALiveCheck(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	mcp := &fakeMcp{tools: 12, outcome: platforms.McpOutcome{ToDo: []string{"Restart the OpenClaw gateway so it loads the new MCP servers."}}}
+	o.Mcp = mcp
+	api.batch = BatchView{State: "approved"}
+	opts := base()
+	opts.Yes = true
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateConnected || mcp.installs != 1 {
+		t.Fatalf("connected and installed once: %+v installs=%d", ns, mcp.installs)
+	}
+	if !strings.Contains(ns.Message, "main 12") || !strings.Contains(ns.Message, "research 12") {
+		t.Fatalf("the live check is in the result: %q", ns.Message)
+	}
+	if len(ns.Checks) != 1 || !strings.Contains(ns.Checks[0].Message, "Restart the OpenClaw gateway") || ns.Checks[0].Status != runtimeproto.CheckWaiting {
+		t.Fatalf("what the person still has to do is named: %+v", ns.Checks)
+	}
+
+	// Rerun: the step runs again and is the installer's to keep idempotent.
+	_ = o.Run(context.Background(), opts)
+	if mcp.installs != 2 {
+		t.Fatalf("every run reaches the MCP step: %d", mcp.installs)
+	}
+}
+
+// "Connected" with an MCP server that does not answer is the state that sent a
+// customer looking for a wrong address. It is a failure, with its own words.
+func TestAFailedMcpCheckIsTheResult(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	o.Mcp = &fakeMcp{tools: 3, probeErr: map[string]error{"research": errors.New("MCP initialize failed: This computer is not connected")}}
+	api.batch = BatchView{State: "approved"}
+	opts := base()
+	opts.Yes = true
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateError || ExitCode(ns, false) == 0 {
+		t.Fatalf("a failed live check fails connect: %+v", ns)
+	}
+	if len(ns.Checks) != 1 || ns.Checks[0].ID != "mcp:research" || !strings.Contains(ns.Checks[0].Message, "not connected") {
+		t.Fatalf("the failure is said per agent: %+v", ns.Checks)
+	}
+	if ns.NextCommand != "contro1 doctor openclaw" {
+		t.Fatalf("with the command that looks further: %q", ns.NextCommand)
+	}
+
+	o2, api2, _, _, _ := setup(t)
+	o2.Mcp = &fakeMcp{installErr: errors.New("openclaw mcp add: exit status 1")}
+	api2.batch = BatchView{State: "approved"}
+	ns = o2.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateError || !strings.Contains(ns.Checks[0].Message, "exit status 1") || ns.NextCommand != "contro1 connect openclaw" {
+		t.Fatalf("an install failure is the result and running connect again is the fix: %+v", ns)
+	}
+}
+
+// A replacement the person cannot see is a silent one.
+func TestThePreviewShowsWhatAChangeReplaces(t *testing.T) {
+	line := describeChange(platforms.Change{Description: "Replace Claude Code's Contro1 MCP server", Before: "https://api.contro1.com/api/centcom/mcp", After: "claude mcp add --scope user contro1 -- contro1 mcp serve --agent a"})
+	if !strings.Contains(line, "(now: https://api.contro1.com/api/centcom/mcp)") || !strings.Contains(line, "--agent a") {
+		t.Fatalf("%q", line)
+	}
+}
+
+// A step the person still has to do (claude not on PATH) leaves connect
+// connected and exit 0, as v0.2.27 did.
+func TestAnMcpStepLeftToThePersonKeepsConnectSuccessful(t *testing.T) {
+	o, api, _, _, _ := setup(t)
+	o.Mcp = &fakeMcp{tools: 4, outcome: platforms.McpOutcome{ToDo: []string{"Let Claude Code use Contro1 (the MCP server): claude mcp add --scope user contro1 -- /usr/local/bin/contro1 mcp serve --agent a"}}}
+	api.batch = BatchView{State: "approved"}
+	opts := base()
+	opts.Yes = true
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateConnected || ExitCode(ns, false) != 0 || !strings.Contains(ns.Checks[0].Message, "claude mcp add --scope user") {
+		t.Fatalf("%+v", ns)
+	}
+}

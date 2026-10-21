@@ -64,8 +64,12 @@ func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		 * these calls against it, so the local list follows it. Only a call
 		 * the narrow list refuses asks, so an approvals-only agent costs no
 		 * extra round trip.
+		 *
+		 * Whatever the server says is recorded, narrower included. Every
+		 * token refresh records it too (tokenprovider.TokenEndpointMode), so
+		 * this is only the fast path for the call that is waiting.
 		 */
-		if live := ds.liveMode(r.Context()); live == runtimeproto.ModeApplications {
+		if live := ds.liveMode(r.Context()); live != "" && live != en.EndpointMode {
 			ds.b.setLocalMode(ds.localID, live)
 			en.EndpointMode = live
 		}

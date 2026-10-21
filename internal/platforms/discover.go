@@ -1,6 +1,7 @@
 package platforms
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -64,10 +65,13 @@ func LocalConnections() ([]LocalConnection, []error) {
 	var out []LocalConnection
 	var problems []error
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if entry.IsDir() || !isMappingFileName(entry.Name()) {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		if !looksLikeMapping(path) {
+			continue
+		}
 		mapping, err := ReadMapping(path)
 		if err != nil {
 			problems = append(problems, err)
@@ -92,6 +96,63 @@ func LocalConnections() ([]LocalConnection, []error) {
 		return out[i].PlatformSubject < out[j].PlatformSubject
 	})
 	return out, problems
+}
+
+/*
+isMappingFileName and looksLikeMapping decide which files in the platforms
+directory are mapping files at all.
+
+WHY. The broker also publishes status.json there, a secret-free health copy
+for doctor. It was read as a mapping, failed the digest check, and every
+"several connections" or "not connected" message then ended with "1 mapping
+file(s) could not be read ... does not match its digest", which reads exactly
+like tampering on a computer where nothing was wrong. A file that is not a
+mapping is not a damaged mapping, so it is skipped without a word.
+
+What still counts as damaged: a mapping-named file that is not JSON, or JSON
+that carries a mapping's fields and fails validation. Those keep being
+reported, because silently skipping a truncated or edited mapping would make a
+connected computer look unconnected.
+*/
+func isMappingFileName(name string) bool {
+	if !strings.HasSuffix(name, ".json") || strings.HasPrefix(name, ".") {
+		return false
+	}
+	return name != "status.json"
+}
+
+func looksLikeMapping(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// Unreadable: let ReadMapping report it.
+		return true
+	}
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(raw, &probe) != nil {
+		// Not JSON at all: damaged, reported by ReadMapping.
+		return true
+	}
+	for _, key := range []string{"schema_version", "platform", "entries", "digest"} {
+		if _, ok := probe[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ClientPlatform names the agent platform whose process started this one, or
+// "" when that cannot be told (Claude Code sets CLAUDECODE for its children).
+//
+// It only words a suggestion, such as which `contro1 connect <platform>` to
+// run. It never chooses a connection: CLAUDECODE is inherited by everything a
+// Claude Code session starts, Codex or an OpenClaw gateway included, so a
+// choice made from it would let any of them act as the Claude Code agent.
+// `contro1 connect` writes --agent into every server it installs instead.
+func ClientPlatform(getenv func(string) string) string {
+	if strings.TrimSpace(getenv("CLAUDECODE")) != "" {
+		return "claude-code"
+	}
+	return ""
 }
 
 // ErrNoLocalConnection means this computer has no published connection, which

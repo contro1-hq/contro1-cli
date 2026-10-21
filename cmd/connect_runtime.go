@@ -468,5 +468,11 @@ func (f fileStates) Clear(platform string) error {
 
 // platformOptions collects adapter overrides from flags.
 func platformOptions() platforms.Options {
-	return platforms.Options{Bin: flagConnectBin, ConfigDir: flagConnectConfigDir, Principal: flagConnectPrincipal, Agents: flagConnectAgents}
+	opts := platforms.Options{Bin: flagConnectBin, ConfigDir: flagConnectConfigDir, Principal: flagConnectPrincipal, Agents: flagConnectAgents}
+	if flagConnectDevelopment {
+		// The development service publishes its own mappings; identity must
+		// be read from the service this connection actually uses.
+		opts.PlatformsDir = brokerpaths.Development().PlatformsDir
+	}
+	return opts
 }

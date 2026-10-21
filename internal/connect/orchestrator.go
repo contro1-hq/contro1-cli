@@ -127,6 +127,23 @@ type Prompter interface {
 	Progress(line string)
 }
 
+/*
+McpStep is the Contro1 MCP server, the last thing connect sets up.
+
+A port rather than adapter methods because one platform's step (NanoClaw) needs
+Contro1 itself: a lease the owner approved, held in OneCLI. Nil skips the step.
+*/
+type McpStep interface {
+	// Changes previews the step for these platform subjects, for the same
+	// confirmation as every other local change. Read only.
+	Changes(ctx context.Context, subjects []string) []platforms.Change
+	// Install runs it once the mapping exists. Idempotent.
+	Install(ctx context.Context, m *runtimeproto.MappingFile, j *platforms.Journal) (platforms.McpOutcome, error)
+	// Probe runs MCP initialize and tools/list through the agent's own endpoint
+	// and returns how many tools it was offered.
+	Probe(ctx context.Context, e runtimeproto.MappingEntry) (int, error)
+}
+
 type StateStore interface {
 	Load(platform string) (*State, error)
 	Save(platform string, st *State) error
@@ -182,6 +199,7 @@ type Orchestrator struct {
 	Adapter  platforms.Adapter
 	Prompt   Prompter
 	States   StateStore
+	Mcp      McpStep
 	Now      func() time.Time
 }
 
@@ -298,6 +316,22 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		}
 		for _, c := range o.Adapter.PlanConfig(o.Broker.MappingPath(p)) {
 			lines = append(lines, c.Description+" ("+c.Path+")")
+		}
+		if o.Mcp != nil {
+			// Every agent the MCP step will touch: the ones found now and the
+			// ones this computer connected before, whose tool rules change too.
+			ids := make([]string, 0, len(subjects))
+			for _, s := range subjects {
+				ids = append(ids, s.ID)
+			}
+			if existing, err := platforms.ReadMapping(o.Broker.MappingPath(p)); err == nil {
+				for _, e := range existing.Entries {
+					ids = append(ids, e.PlatformSubject)
+				}
+			}
+			for _, c := range o.Mcp.Changes(ctx, ids) {
+				lines = append(lines, describeChange(c))
+			}
 		}
 		/*
 		 * --yes APPROVES THE LOCAL CHANGES, NOT THE LIST OF IDENTITIES.
@@ -621,9 +655,27 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 	 * approvals that were never going to come.
 	 */
 	remaining := o.Adapter.RemainingSetup()
-	ns.Message = fmt.Sprintf("%s is connected (%d agent(s)). %s", instanceLabel(p), len(mapping.Entries), o.Adapter.SafeTest())
+	mcpSummary := ""
+	if o.Mcp != nil {
+		var mcpTodo []string
+		var failed []runtimeproto.Check
+		mcpSummary, mcpTodo, failed = o.runMcp(ctx, opts, mapping, st)
+		save("mcp")
+		remaining = append(remaining, mcpTodo...)
+		if len(failed) > 0 {
+			ns.State = runtimeproto.StateError
+			ns.Message = fmt.Sprintf("%s is connected (%d agent(s)), but its Contro1 MCP server does not work yet:", instanceLabel(p), len(mapping.Entries))
+			ns.Checks = append(ns.Checks, failed...)
+			ns.NextCommand = failed[0].NextCommand
+			return ns
+		}
+	}
+	ns.Message = fmt.Sprintf("%s is connected (%d agent(s)).%s %s", instanceLabel(p), len(mapping.Entries), mcpSummary, o.Adapter.SafeTest())
 	if len(remaining) > 0 {
 		ns.Message = fmt.Sprintf("%s is connected (%d agent(s)), but it is not working end to end yet:", instanceLabel(p), len(mapping.Entries))
+		if mcpSummary != "" {
+			ns.Message = fmt.Sprintf("%s is connected (%d agent(s)).%s But it is not working end to end yet:", instanceLabel(p), len(mapping.Entries), mcpSummary)
+		}
 		for i, step := range remaining {
 			ns.Checks = append(ns.Checks, runtimeproto.Check{
 				ID:      fmt.Sprintf("remaining_%d", i+1),
@@ -636,6 +688,71 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		ns.NextCommand = "contro1 doctor " + p
 	}
 	return ns
+}
+
+/*
+runMcp installs the MCP server and then asks it, through each agent's own
+endpoint, the two questions an MCP client asks first.
+
+The live check is the point. "Installed" is a claim about a config file;
+"answers initialize and lists N tools" is what the agent will actually get, and
+it is the line a person (or the assistant running connect for them) can trust.
+A failure is said with its own words and the command that looks further.
+*/
+func (o *Orchestrator) runMcp(ctx context.Context, opts Options, mapping *runtimeproto.MappingFile, st *State) (summary string, todo []string, failed []runtimeproto.Check) {
+	p := opts.Platform
+	o.Prompt.Progress("Setting up the Contro1 MCP server...")
+	outcome, err := o.Mcp.Install(ctx, mapping, &st.Journal)
+	for _, line := range outcome.Done {
+		o.Prompt.Progress(line)
+	}
+	if err != nil {
+		failed = append(failed, runtimeproto.Check{ID: "mcp_install", Label: "Contro1 MCP server", Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message: "Could not set it up: " + err.Error(), NextCommand: o.cmd(opts, "")})
+		return "", outcome.ToDo, failed
+	}
+	counts := map[string]int{}
+	for _, e := range mapping.Entries {
+		tools, err := o.Mcp.Probe(ctx, e)
+		if err != nil {
+			failed = append(failed, runtimeproto.Check{ID: "mcp:" + e.PlatformSubject, Label: "MCP for " + e.PlatformSubject, Status: runtimeproto.CheckRepairable, Actor: "you",
+				Message: err.Error(), NextCommand: "contro1 doctor " + p})
+			continue
+		}
+		counts[e.PlatformSubject] = tools
+	}
+	if len(failed) > 0 {
+		return "", outcome.ToDo, failed
+	}
+	if len(mapping.Entries) == 1 {
+		summary = fmt.Sprintf(" MCP connected: %d actions available.", counts[mapping.Entries[0].PlatformSubject])
+		o.Prompt.Progress(strings.TrimSpace(summary))
+	} else {
+		var parts []string
+		for _, e := range mapping.Entries {
+			line := fmt.Sprintf("MCP connected for %s: %d actions available.", e.PlatformSubject, counts[e.PlatformSubject])
+			o.Prompt.Progress(line)
+			parts = append(parts, fmt.Sprintf("%s %d", e.PlatformSubject, counts[e.PlatformSubject]))
+		}
+		summary = " MCP connected, actions available: " + strings.Join(parts, ", ") + "."
+	}
+	return summary, outcome.ToDo, nil
+}
+
+// describeChange is one preview line: what, and the exact command or file.
+// Before is part of it: a replacement the person cannot see is a silent one.
+func describeChange(c platforms.Change) string {
+	line := c.Description
+	if c.Before != "" {
+		line += " (now: " + c.Before + ")"
+	}
+	switch {
+	case c.After != "":
+		line += ": " + c.After
+	case c.Path != "":
+		line += " (" + c.Path + ")"
+	}
+	return line
 }
 
 // ---------------------------------------------------------------------------

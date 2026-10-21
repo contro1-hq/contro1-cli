@@ -27,6 +27,7 @@ import (
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
 	"github.com/contro1-hq/contro1-cli/internal/keystore"
 	"github.com/contro1-hq/contro1-cli/internal/localipc"
+	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 	"github.com/contro1-hq/contro1-cli/internal/tokenprovider"
 )
 
@@ -108,6 +109,7 @@ func New(cfg Config) (*Broker, error) {
 	}
 	b := &Broker{cfg: cfg, store: store, startedAt: time.Now(), endpoints: map[string]*dataServer{}}
 	b.provider = tokenprovider.New(store, cfg.Keys, cfg.HTTP, cfg.APIURL)
+	b.provider.ModeObserved = b.setLocalMode
 	return b, nil
 }
 
@@ -375,22 +377,28 @@ func (b *Broker) markLocal(localID, state, code string) {
 }
 
 // setLocalMode records the mode the server reported for one connection and
-// rewrites the platform mapping, which carries it too.
+// rewrites the platform mapping, which carries it too. Either direction: a
+// narrowed connection must not keep a mapping that still claims applications.
+// Nothing is rewritten when the mode is already the recorded one.
 func (b *Broker) setLocalMode(localID, mode string) {
+	if !runtimeproto.ValidMode(mode) {
+		return
+	}
 	var platform string
 	_, _ = b.store.UpdateState(func(st *brokerstore.State) error {
 		for i := range st.Enrollments {
-			if st.Enrollments[i].LocalID == localID {
+			if st.Enrollments[i].LocalID == localID && st.Enrollments[i].EndpointMode != mode {
 				st.Enrollments[i].EndpointMode = mode
 				platform = st.Enrollments[i].Platform
 			}
 		}
 		return nil
 	})
-	if platform != "" {
-		if _, _, err := b.writeMapping(platform, ""); err != nil {
-			b.cfg.Logf("mapping for %s: %v", platform, err)
-		}
+	if platform == "" {
+		return
+	}
+	if _, _, err := b.writeMapping(platform, ""); err != nil {
+		b.cfg.Logf("mapping for %s: %v", platform, err)
 	}
 	b.writeStatus()
 }

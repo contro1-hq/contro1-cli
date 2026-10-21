@@ -145,7 +145,10 @@ func renderNextStep(ns runtimeproto.NextStep) error {
 
 func runConnect(cmd *cobra.Command, args []string) error {
 	platform := args[0]
-	adapter, err := platforms.New(platform, platformOptions())
+	popts := platformOptions()
+	// NanoClaw's MCP step points the agent at Contro1 by URL.
+	popts.McpURL = mcpURL()
+	adapter, err := platforms.New(platform, popts)
 	if err != nil {
 		return output.Errf(output.CodeBadArgs, "%v", err)
 	}
@@ -174,13 +177,15 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	host, _ := os.Hostname()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	prompt := terminalPrompt{json: connectFormatJSON()}
 	o := &connect.Orchestrator{
 		API:      connectAPI{c: c},
 		Broker:   newServiceBroker(flagConnectDevelopment),
 		Verifier: endpointVerifier{},
 		Adapter:  adapter,
-		Prompt:   terminalPrompt{json: connectFormatJSON()},
+		Prompt:   prompt,
 		States:   fileStates{},
+		Mcp:      connectMcp{platform: platform, adapter: adapter, progress: prompt.Progress},
 	}
 	ns := o.Run(ctx, connect.Options{
 		Platform: platform, APIURL: strings.TrimRight(apiURL, "/"), Owner: flagConnectOwner, Resume: flagConnectResume,

@@ -3,10 +3,11 @@
 // (or groups), and they tell the platform where its mapping file is. They
 // never hold credentials.
 //
-// VERIFICATION STATUS: discovery commands and config file locations for
-// OpenClaw and NanoClaw are written from their documentation and the existing
-// bridges, and are UNVERIFIED against real installations. Each is overridable
-// with flags so the handoff machine can correct them without a rebuild.
+// VERIFICATION STATUS: OpenClaw's discovery, config location and MCP setup are
+// checked against OpenClaw's source and docs (2026.10.5; see openclaw_mcp.go).
+// NanoClaw's are written from its documentation and the existing bridges and
+// are UNVERIFIED against real installations. Each is overridable with flags so
+// the handoff machine can correct them without a rebuild.
 package platforms
 
 import (
@@ -124,6 +125,11 @@ type Options struct {
 	// McpURL is where a platform that cannot use a local endpoint reaches
 	// Contro1. A URL only: a remote MCP server authenticates its own client.
 	McpURL string
+	// PlatformsDir is where the Contro1 service in use publishes mapping
+	// files. Empty is the installed service's; a development service has its
+	// own, and reading the wrong one gave a --development connection a second
+	// subject for the same Claude Code.
+	PlatformsDir string
 }
 
 func New(platform string, opts Options) (Adapter, error) {
