@@ -90,6 +90,14 @@ func remarshal(in any, out any) error {
 type serviceBroker struct {
 	layout      brokerpaths.Layout
 	development bool
+	// compare is how the installed service is set against this CLI; a field so
+	// tests never read the real service.
+	compare func() installer.ServiceComparison
+	// update is compared once per run, so the preview and the elevated phase
+	// that follows it agree on whether the service is updated.
+	update        *installer.ServiceComparison
+	updateMessage string
+	updateErr     error
 }
 
 func newServiceBroker(development bool) *serviceBroker {
@@ -97,7 +105,112 @@ func newServiceBroker(development bool) *serviceBroker {
 	if development {
 		layout = brokerpaths.Development()
 	}
-	return &serviceBroker{layout: layout, development: development}
+	s := &serviceBroker{layout: layout, development: development}
+	s.compare = func() installer.ServiceComparison {
+		c, installed, running := compareInstalledService(layout)
+		if !installed || !running {
+			// The elevated phase installs and starts a missing or stopped
+			// service with this CLI's binary anyway; the preview says so.
+			return installer.ServiceComparison{To: c.To}
+		}
+		return c
+	}
+	return s
+}
+
+/*
+compareInstalledService sets the installed Contro1 service against the CLI
+running now, read without elevation: the version the service publishes in its
+status file and, when that cannot decide, the installed binary's hash.
+*/
+func compareInstalledService(layout brokerpaths.Layout) (c installer.ServiceComparison, installed, running bool) {
+	installed, running, _, _ = installer.ServiceStatus()
+	version := ""
+	for _, dir := range []string{layout.PlatformsDir, layout.StateDir} {
+		if st, err := brokerstore.OpenReadOnly(dir).ReadStatus(); err == nil {
+			version = st.BrokerVersion
+			break
+		}
+	}
+	exe, _ := os.Executable()
+	c = installer.CompareService(version, Version, func() (bool, error) {
+		if exe == "" || layout.BinaryPath == "" {
+			return false, errors.New("no binary to compare")
+		}
+		return installer.BinaryDiffers(exe, layout.BinaryPath)
+	})
+	return c, installed, running
+}
+
+// serviceUpdateCommand is the command that updates the service by hand here.
+func serviceUpdateCommand() string {
+	exe, _ := os.Executable()
+	return installer.UpdateCommand(runtime.GOOS, exe)
+}
+
+func (s *serviceBroker) serviceUpdate() installer.ServiceComparison {
+	if s.development || s.compare == nil {
+		return installer.ServiceComparison{}
+	}
+	if s.update == nil {
+		c := s.compare()
+		s.update = &c
+	}
+	return *s.update
+}
+
+// PendingServiceUpdate is the preview line when the installed service runs an
+// older or different binary than this CLI. The next elevated phase updates it.
+func (s *serviceBroker) PendingServiceUpdate() string {
+	if c := s.serviceUpdate(); c.Needed {
+		return c.UpdateLine()
+	}
+	return ""
+}
+
+// UpdateService updates the service in an elevated phase of its own, for a run
+// that has nothing else to ask an administrator for.
+func (s *serviceBroker) UpdateService(ctx context.Context, apiURL string) error {
+	_, err := s.runPhase(ctx, connectPhase{APIURL: apiURL})
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	if errors.Is(err, installer.ErrElevationDeclined) || errors.Is(err, installer.ErrNeedsElevation) {
+		return fmt.Errorf("it needs administrator approval, which was not given. Your agents keep working on the installed one; to update it later, run %s", serviceUpdateCommand())
+	}
+	return err
+}
+
+// ServiceUpdateResult is what the last elevated phase did about the update:
+// a line to show when it worked, or why it did not.
+func (s *serviceBroker) ServiceUpdateResult() (string, error) {
+	return s.updateMessage, s.updateErr
+}
+
+/*
+runPhase runs one elevated phase and, when the service is due an update, the
+update with it.
+
+ONE APPROVAL. The update rides on whatever this run already asks an
+administrator for (registering keys, moving endpoints, disconnect's revoke),
+because a second prompt for the same computer in the same command reads as
+something going wrong, and people decline it.
+*/
+func (s *serviceBroker) runPhase(ctx context.Context, phase connectPhase) (*connectPhase, error) {
+	update := s.serviceUpdate()
+	phase.UpdateService = update.Needed
+	done, err := elevatedPhase(ctx, phase)
+	if !phase.UpdateService || done == nil {
+		return done, err
+	}
+	switch {
+	case done.ServiceUpdateError != "":
+		s.updateErr = fmt.Errorf("%s. It still runs %s; to update it, run %s", done.ServiceUpdateError, orDefault(update.From, "the installed build"), serviceUpdateCommand())
+	case done.ServiceVersion != "":
+		s.updateMessage = "The Contro1 service was updated to " + done.ServiceVersion + " and is running again."
+		s.update = &installer.ServiceComparison{From: done.ServiceVersion, To: update.To}
+	}
+	return done, err
 }
 
 func (s *serviceBroker) controlClient() (*http.Client, error) {
@@ -155,7 +268,43 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 		}
 		return registerOverControl(ctx, s.layout, req)
 	}
-	phase := connectPhase{APIURL: apiURL, Request: req}
+	done, err := s.runPhase(ctx, connectPhase{APIURL: apiURL, Request: req})
+	if err != nil {
+		return nil, err
+	}
+	return done.Results, nil
+}
+
+/*
+RevokeLocal removes this computer's connections for one platform from the
+Contro1 service: it stops their endpoints, deletes their keys and republishes
+the mapping without them.
+
+WHY. Disconnect revoked the connections in Contro1 and left all of that here,
+on the reasoning that the endpoints stop by themselves once the server
+revokes. They refuse, but they stay published: a real Codex test then had
+`contro1 mcp serve` choose the revoked agent, and be refused, on every start.
+The mapping belongs to the service, so removing it takes the same one
+administrator approval as connecting; development drives the foreground
+service directly.
+*/
+func (s *serviceBroker) RevokeLocal(ctx context.Context, apiURL, platform string) error {
+	if s.development {
+		return revokePlatformOverControl(ctx, s.layout, platform)
+	}
+	_, err := s.runPhase(ctx, connectPhase{APIURL: apiURL, RevokePlatform: platform})
+	return err
+}
+
+// elevatedPhase is runElevatedPhase; a variable so tests can see the phase a
+// command asks for without an administrator prompt.
+var elevatedPhase = runElevatedPhase
+
+// runElevatedPhase hands a phase to `contro1 broker register`, elevated unless
+// this process already is, and returns what it wrote back. What it wrote back
+// is returned with a failure too: it says what happened to the service update.
+func runElevatedPhase(ctx context.Context, phase connectPhase) (*connectPhase, error) {
+	apiURL := phase.APIURL
 	path, err := writePhaseFile(phase)
 	if err != nil {
 		return nil, err
@@ -177,7 +326,7 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 			// run connect again, which opened a second request. The phase file
 			// says which it was.
 			if done, _ := readPhaseFile(path); done != nil && done.Error != "" {
-				return nil, errors.New(done.Error)
+				return done, errors.New(done.Error)
 			}
 		}
 		if err != nil {
@@ -186,9 +335,9 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 		if code != 0 {
 			done, _ := readPhaseFile(path)
 			if done != nil && done.Error != "" {
-				return nil, errors.New(done.Error)
+				return done, errors.New(done.Error)
 			}
-			return nil, fmt.Errorf("the elevated setup exited with code %d", code)
+			return done, fmt.Errorf("the elevated setup exited with code %d", code)
 		}
 	}
 	done, err := readPhaseFile(path)
@@ -196,9 +345,44 @@ func (s *serviceBroker) Register(ctx context.Context, apiURL string, req broker.
 		return nil, err
 	}
 	if done.Error != "" {
-		return nil, errors.New(done.Error)
+		return done, errors.New(done.Error)
 	}
-	return done.Results, nil
+	return done, nil
+}
+
+/*
+revokePlatformOverControl revokes, on this computer only, every connection the
+service holds for one platform. A service that does not answer has nothing
+running to stop, so the mapping it left behind is removed directly.
+*/
+func revokePlatformOverControl(ctx context.Context, layout brokerpaths.Layout, platform string) error {
+	// The platform names a file the elevated phase deletes; only a known one.
+	known := false
+	for _, p := range platforms.Supported {
+		known = known || p == platform
+	}
+	if !known {
+		return fmt.Errorf("unknown platform %q", platform)
+	}
+	resp, err := controlCall(ctx, layout, "GET", "/control/v1/enrollments", nil)
+	if err != nil {
+		removeErr := os.Remove(filepath.Join(layout.PlatformsDir, platform+".json"))
+		if removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fmt.Errorf("the Contro1 service did not answer (%v) and its mapping could not be removed: %w", err, removeErr)
+		}
+		return nil
+	}
+	var errs []error
+	for _, raw := range asSlice(resp["enrollments"]) {
+		en := asMap(raw)
+		if str(en["platform"]) != platform || (str(en["state"]) != "active" && str(en["state"]) != "pending") {
+			continue
+		}
+		if _, err := controlCall(ctx, layout, "POST", "/control/v1/enrollments/"+url.PathEscape(str(en["local_id"]))+"/revoke", map[string]bool{"remote": false}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // SetPrincipals changes who may reach existing endpoints, through the same one
@@ -218,8 +402,21 @@ func (s *serviceBroker) SetPrincipals(ctx context.Context, apiURL string, update
 type connectPhase struct {
 	APIURL  string                           `json:"api_url"`
 	Request broker.ControlConnectionsRequest `json:"request"`
-	Results []broker.ControlItemResult       `json:"results,omitempty"`
-	Error   string                           `json:"error,omitempty"`
+	// RevokePlatform, when set, is disconnect's phase: revoke that platform's
+	// connections on this computer and nothing else. No install.
+	RevokePlatform string `json:"revoke_platform,omitempty"`
+	// UpdateService replaces the installed service's binary with this one
+	// (stop, copy, start) before anything else in the phase. Keys, state and
+	// mappings are not touched. Alone, with nothing else set, it is the whole
+	// phase.
+	UpdateService bool `json:"update_service,omitempty"`
+	// ServiceVersion is the version the service answered with after the
+	// update; ServiceUpdateError is why there was none. An update that fails
+	// never fails the rest of the phase: the previous binary is put back.
+	ServiceVersion     string                     `json:"service_version,omitempty"`
+	ServiceUpdateError string                     `json:"service_update_error,omitempty"`
+	Results            []broker.ControlItemResult `json:"results,omitempty"`
+	Error              string                     `json:"error,omitempty"`
 }
 
 func phaseDir() string {
@@ -267,8 +464,33 @@ func runRegisterPhase(ctx context.Context, path string) error {
 		_ = os.WriteFile(path, raw, 0o600)
 		return failure
 	}
-	layout := brokerpaths.Production(runtime.GOOS)
-	if installed, running, _, _ := installer.ServiceStatus(); !installed || !running {
+	layout := phaseLayout()
+	/*
+	 * The update first, so everything after it talks to the new service.
+	 *
+	 * Disconnect's revoke would work without it: this phase runs in the NEW
+	 * CLI, and the control calls it makes (list, revoke) are in every service
+	 * version. It still goes first, because only a current service also drops
+	 * a connection revoked from Contro1 out of the mapping by itself.
+	 */
+	if phase.UpdateService {
+		version, err := updateInstalledService(ctx, layout, phase.APIURL)
+		phase.ServiceVersion = version
+		if err != nil {
+			phase.ServiceUpdateError = err.Error()
+		}
+	}
+	if phase.RevokePlatform != "" {
+		return finish(nil, revokePlatformOverControl(ctx, layout, phase.RevokePlatform))
+	}
+	if phase.UpdateService && len(phase.Request.Items) == 0 && len(phase.Request.PrincipalUpdates) == 0 {
+		var failure error
+		if phase.ServiceUpdateError != "" {
+			failure = errors.New("the Contro1 service was not updated: " + phase.ServiceUpdateError)
+		}
+		return finish(nil, failure)
+	}
+	if installed, running, _, _ := serviceStatus(); !installed || !running {
 		exe, _ := os.Executable()
 		plan := installer.Plan(runtime.GOOS, installer.Options{SourceBinary: exe, APIURL: phase.APIURL, Version: Version})
 		if _, err := installer.Apply(plan, installer.SystemRunner{}, filepath.Join(layout.StateDir, "install-journal.json")); err != nil {
@@ -289,6 +511,67 @@ func runRegisterPhase(ctx context.Context, path string) error {
 			return finish(nil, fmt.Errorf("the Contro1 service did not answer: %w", err))
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// phaseLayout, serviceStatus and updateInstalledService are what the elevated
+// phase acts on; variables so tests run it against a temporary layout and a
+// fake service, never this computer's.
+var (
+	phaseLayout            = func() brokerpaths.Layout { return brokerpaths.Production(runtime.GOOS) }
+	serviceStatus          = installer.ServiceStatus
+	updateInstalledService = updateServiceBinary
+)
+
+/*
+updateServiceBinary runs the install step on an installed service: stop it,
+copy this binary over its own, start it, then wait until it answers on its
+control endpoint as this version. Keys, connections and mappings stay as they
+are; the install step never touches them.
+
+The service keeps the Contro1 address it already has. disconnect runs this
+without one, and on Linux and macOS the step rewrites the service definition,
+so a definition without --api-url would have dropped it.
+*/
+func updateServiceBinary(ctx context.Context, layout brokerpaths.Layout, apiURL string) (string, error) {
+	if health, err := controlCall(ctx, layout, "GET", "/control/v1/health", nil); err == nil && str(health["api_url"]) != "" {
+		apiURL = str(health["api_url"])
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	plan := installer.Plan(runtime.GOOS, installer.Options{SourceBinary: exe, APIURL: apiURL, Version: Version})
+	if _, err := installer.Apply(plan, installer.SystemRunner{}, filepath.Join(layout.StateDir, "install-journal.json")); err != nil {
+		return "", err
+	}
+	return waitForServiceVersion(ctx, layout, Version, 45*time.Second)
+}
+
+// waitForServiceVersion is the check that the update worked: the service is
+// back and is the version that was installed, not merely a file copied.
+func waitForServiceVersion(ctx context.Context, layout brokerpaths.Layout, want string, within time.Duration) (string, error) {
+	deadline := time.Now().Add(within)
+	last := ""
+	for {
+		health, err := controlCall(ctx, layout, "GET", "/control/v1/health", nil)
+		if err == nil {
+			last = str(health["version"])
+			if last == want {
+				return last, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			if last != "" {
+				return last, fmt.Errorf("the Contro1 service came back as %s, not %s", last, want)
+			}
+			return "", fmt.Errorf("the Contro1 service did not answer within %s after the update", within)
+		}
+		select {
+		case <-ctx.Done():
+			return last, ctx.Err()
+		case <-time.After(time.Second):
+		}
 	}
 }
 

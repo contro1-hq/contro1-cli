@@ -277,6 +277,8 @@ func TestReuseIsTerminal(t *testing.T) {
 	as.previous = "ccrt_older"
 	as.mu.Unlock()
 	expireCache(p)
+	var observed []string
+	p.StateObserved = func(localID, state string) { observed = append(observed, localID+"="+state) }
 	_, err := p.AccessToken(context.Background(), "loc_1", runtimeproto.ResourceAPI)
 	var te *Error
 	if !errors.As(err, &te) || te.Kind != "reuse_suspended" || !te.Terminal() || te.Remediation == nil {
@@ -285,6 +287,10 @@ func TestReuseIsTerminal(t *testing.T) {
 	st, _ := store.LoadState()
 	if st.Enrollments[0].State != "suspended" {
 		t.Fatalf("local state must reflect suspension, got %s", st.Enrollments[0].State)
+	}
+	// The broker is told, so it stops publishing the connection.
+	if len(observed) != 1 || observed[0] != "loc_1=suspended" {
+		t.Fatalf("an ended connection is reported once: %v", observed)
 	}
 	if _, err := p.AccessToken(context.Background(), "loc_1", runtimeproto.ResourceAPI); !IsTerminal(err) {
 		t.Fatalf("a suspended connection stays refused: %v", err)

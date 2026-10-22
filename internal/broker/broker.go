@@ -110,6 +110,7 @@ func New(cfg Config) (*Broker, error) {
 	b := &Broker{cfg: cfg, store: store, startedAt: time.Now(), endpoints: map[string]*dataServer{}}
 	b.provider = tokenprovider.New(store, cfg.Keys, cfg.HTTP, cfg.APIURL)
 	b.provider.ModeObserved = b.setLocalMode
+	b.provider.StateObserved = b.connectionEnded
 	return b, nil
 }
 
@@ -374,6 +375,27 @@ func (b *Broker) markLocal(localID, state, code string) {
 		}
 		return nil
 	})
+}
+
+/*
+connectionEnded republishes the platform mapping once a refresh has found a
+connection revoked, suspended or expired in Contro1.
+
+WHY. The mapping is what every client reads to find an agent, and it was only
+rewritten for changes made on this computer. A connection revoked in Contro1,
+including by `contro1 disconnect`, stayed published, and `contro1 mcp serve`
+kept choosing it and being refused. The endpoint already refuses a connection
+that is not active; this stops it being offered.
+*/
+func (b *Broker) connectionEnded(localID, _ string) {
+	en, err := b.enrollment(localID)
+	if err != nil {
+		return
+	}
+	if _, _, err := b.writeMapping(en.Platform, ""); err != nil {
+		b.cfg.Logf("mapping for %s: %v", en.Platform, err)
+	}
+	b.writeStatus()
 }
 
 // setLocalMode records the mode the server reported for one connection and

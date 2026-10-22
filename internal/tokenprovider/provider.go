@@ -101,6 +101,11 @@ type Provider struct {
 	// rewrites the connection's mode and its platform mapping. It is called
 	// after the connection's token lock is released.
 	ModeObserved func(localID, mode string)
+	// StateObserved is told when a refresh finds the connection gone for good
+	// (revoked, suspended, expired). The broker rewrites the platform mapping
+	// so the dead entry stops being published. Called after the connection's
+	// token lock is released, like ModeObserved.
+	StateObserved func(localID, state string)
 
 	mu       sync.Mutex
 	entries  map[string]*entry
@@ -179,9 +184,13 @@ func (p *Provider) AccessToken(ctx context.Context, localID, resource string) (s
 	var observed string
 	// Registered before the unlock, so it runs after it: the callback writes
 	// state and files and must not hold up other callers of this connection.
+	ended := ""
 	defer func() {
 		if observed != "" && p.ModeObserved != nil {
 			p.ModeObserved(localID, observed)
+		}
+		if ended != "" && p.StateObserved != nil {
+			p.StateObserved(localID, ended)
 		}
 	}()
 	e.mu.Lock()
@@ -223,7 +232,8 @@ func (p *Provider) AccessToken(ctx context.Context, localID, resource string) (s
 		if errors.As(err, &te) && te.Terminal() {
 			// The family is gone server-side; the journal no longer matters.
 			_ = p.Store.ClearJournal(localID)
-			p.markState(localID, stateForKind(te.Kind), te.Kind)
+			ended = stateForKind(te.Kind)
+			p.markState(localID, ended, te.Kind)
 		}
 		return "", err
 	}

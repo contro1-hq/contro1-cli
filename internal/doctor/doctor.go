@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
+	"github.com/contro1-hq/contro1-cli/internal/installer"
 	"github.com/contro1-hq/contro1-cli/internal/platforms"
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 )
@@ -73,6 +74,48 @@ type Env interface {
 	// ErrNotApplicable when the platform has nothing to check.
 	ConfigStatus(ctx context.Context, platform string) (ConfigState, error)
 	Development() bool
+}
+
+// ServiceVersionEnv is optional on an Env: one that can set the installed
+// service against this CLI, and name the command that updates it here.
+type ServiceVersionEnv interface {
+	ServiceVersion() (c installer.ServiceComparison, updateCommand string)
+}
+
+/*
+ServiceVersionCheck says which version the installed Contro1 service runs and,
+when it is older than (or a different build from) this CLI, the command that
+updates it.
+
+WHY. The service is a separate copy of contro1 that only an administrator
+replaces. Nothing showed which copy was running, so a fix released in the CLI
+looked missing on a computer whose service had simply never been updated.
+*/
+func ServiceVersionCheck(c installer.ServiceComparison, updateCommand string) runtimeproto.Check {
+	check := runtimeproto.Check{ID: "service_version", Label: "Contro1 service", Status: runtimeproto.CheckOK}
+	version := c.From
+	if version == "" {
+		version = "unknown"
+	}
+	switch {
+	case c.Needed && c.From != "" && c.From != c.To:
+		check.Status, check.Actor = runtimeproto.CheckRepairable, "administrator"
+		check.Message = fmt.Sprintf("version %s, older than this CLI (%s). Update it with %s, or run contro1 connect again, which updates it in the same administrator approval.", c.From, c.To, updateCommand)
+		check.NextCommand = updateCommand
+	case c.Needed:
+		check.Status, check.Actor = runtimeproto.CheckRepairable, "administrator"
+		check.Message = fmt.Sprintf("version %s, a different build from this CLI (%s). Update it with %s.", version, c.To, updateCommand)
+		check.NextCommand = updateCommand
+	case c.Newer:
+		check.Status, check.Actor = runtimeproto.CheckRepairable, "you"
+		check.Message = fmt.Sprintf("version %s, newer than this CLI (%s). Update the CLI; the service is never replaced with an older one.", c.From, c.To)
+	default:
+		if c.From == "" {
+			version = c.To
+		}
+		check.Message = fmt.Sprintf("version %s (matches the CLI).", version)
+	}
+	return check
 }
 
 // ErrNotApplicable is a question the platform has no answer to, which is not
@@ -153,6 +196,10 @@ func Run(ctx context.Context, env Env, platform string) Report {
 		} else {
 			add(&r, runtimeproto.Check{ID: "service_running", Label: "Contro1 service running", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "The Contro1 service is stopped.", NextCommand: repair})
 		}
+		if sv, ok := env.(ServiceVersionEnv); ok && !env.Development() {
+			c, command := sv.ServiceVersion()
+			add(&r, ServiceVersionCheck(c, command))
+		}
 		if env.Development() {
 			add(&r, runtimeproto.Check{ID: "service_autostart", Label: "Starts automatically", Status: runtimeproto.CheckNotApplicable, Message: "Development service runs only while its terminal is open."})
 		} else if automatic {
@@ -192,6 +239,11 @@ func Run(ctx context.Context, env Env, platform string) Report {
 	switch {
 	case mapErr != nil || mapping == nil:
 		add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "No agent mapping for " + platform + " on this computer.", NextCommand: fmt.Sprintf("contro1 connect %s", platform)})
+	case len(mapping.Entries) == 0:
+		// An empty mapping is what the service leaves when every connection
+		// ended (disconnected or revoked in Contro1). Reporting it as fine read
+		// "claude-code is connected" over "0 connected", with no way forward.
+		add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "No " + platform + " agent is connected on this computer. A connection that was disconnected in Contro1 is removed here too.", NextCommand: fmt.Sprintf("contro1 connect %s", platform)})
 	case discErr != nil:
 		add(&r, runtimeproto.Check{ID: "mapping_complete", Label: "Every agent mapped", Status: runtimeproto.CheckRepairable, Actor: "you", Message: "Could not list " + platform + " agents: " + discErr.Error(), NextCommand: repair})
 	default:
@@ -529,7 +581,14 @@ cause is one line.
 func addMcpServerChecks(ctx context.Context, r *Report, env Env, platform, name string, e runtimeproto.MappingEntry) {
 	subject := e.PlatformSubject
 	fix := "contro1 connect " + platform
-	if servers, err := env.McpServers(ctx, platform, subject); err == nil {
+	servers, err := env.McpServers(ctx, platform, subject)
+	if errors.Is(err, platforms.ErrMcpConfigUnreadable) {
+		// A config file that exists and cannot be read is a finding, not a
+		// platform with nothing to say: the client cannot load Contro1 from it.
+		add(r, runtimeproto.Check{ID: "mcp_server:" + subject, Label: "MCP server for " + subject, Status: runtimeproto.CheckRepairable, Actor: "you",
+			Message: err.Error() + ". Fix the file, then run " + fix + ".", NextCommand: fix})
+	}
+	if err == nil {
 		id := "mcp_server:" + subject
 		label := "MCP server for " + subject
 		var ours *McpServerConfig

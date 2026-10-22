@@ -37,7 +37,7 @@ func TestMcpSetupMessageNamesTheExactFix(t *testing.T) {
 	}
 
 	none := mcpSetupMessage(platforms.ErrNoLocalConnection, "", "", nil, "")
-	if !strings.Contains(none, "This computer is not connected to Contro1. Run contro1 connect <claude-code|openclaw|nanoclaw>") {
+	if !strings.Contains(none, "This computer is not connected to Contro1. Run contro1 connect <claude-code|cursor|codex|openclaw|nanoclaw>") {
 		t.Fatalf("unconnected: %q", none)
 	}
 	if fromClaude := mcpSetupMessage(platforms.ErrNoLocalConnection, "", "claude-code", nil, ""); !strings.Contains(fromClaude, "Run contro1 connect claude-code ") {

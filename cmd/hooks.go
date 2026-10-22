@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/client"
+	"github.com/contro1-hq/contro1-cli/internal/localipc"
 	"github.com/contro1-hq/contro1-cli/internal/output"
+	"github.com/contro1-hq/contro1-cli/internal/platforms"
 	"github.com/spf13/cobra"
 )
 
@@ -78,15 +81,25 @@ func init() {
 		Short: "Gate production deploys from Codex hooks",
 		Long: `Read a Codex PreToolUse or PermissionRequest event from stdin. Deploy-like
 Bash commands create a canonical Contro1 approval request and remain blocked
-until the required reviewer approves. Non-deploy commands are left to Codex's
-normal permission flow.`,
+until the reviewer approves. Non-deploy commands are left to Codex's normal
+permission flow.
+
+The request is made as the Codex agent when this computer ran
+contro1 connect codex, and otherwise with your own CLI sign-in. Without --role
+it goes to the agent's reviewer (its owner) or the Action's approval policy;
+an agent with no owner goes to the admin routing inbox.`,
 		Example: `  # Called by a Codex hook, not normally by hand:
-  contro1 hooks codex --role cto --environment production --setup convenience
-  contro1 hooks codex --role cto --required-approvals 2 --setup enterprise`,
+  contro1 hooks codex --environment production --setup convenience
+  contro1 hooks codex --role release-manager --required-approvals 2 --setup enterprise`,
 		Args: cobra.NoArgs,
 		RunE: runCodexHook,
 	}
-	codexCmd.Flags().StringVar(&codexHookRole, "role", envOr("CONTRO1_DEPLOY_REQUIRED_ROLE", "cto"), "reviewer role required for the deploy")
+	// No default role. A built-in "cto" sent every deploy to a role most
+	// organizations do not have, so it waited for nobody. Without --role the
+	// server routes it like any other request: the agent's reviewer (its owner)
+	// or the action's approval policy, and an ownerless agent's request goes to
+	// the admin routing inbox.
+	codexCmd.Flags().StringVar(&codexHookRole, "role", envOr("CONTRO1_DEPLOY_REQUIRED_ROLE", ""), "reviewer role required for the deploy (default: none, so it goes to the agent's reviewer or the action's approval policy; an ownerless agent's request goes to the admin routing inbox)")
 	codexCmd.Flags().StringVar(&codexHookRisk, "risk", envOr("CONTRO1_DEPLOY_RISK", "critical"), "risk level: low|medium|high|critical")
 	codexCmd.Flags().StringVar(&codexHookEnvironment, "environment", envOr("CONTRO1_DEPLOY_ENVIRONMENT", "production"), "deployment environment shown to the reviewer")
 	codexCmd.Flags().StringVar(&codexHookTarget, "target", os.Getenv("CONTRO1_DEPLOY_TARGET"), "service, cluster, account, or other deployment target")
@@ -134,13 +147,16 @@ func runCodexHook(_ *cobra.Command, _ []string) error {
 		return renderCodexHookDecision(input, false, "Blocked: --setup must be convenience or enterprise.")
 	}
 
-	c, _, err := newClient()
+	c, asAgent, err := codexHookClient()
 	if err != nil {
-		return renderCodexHookDecision(input, false, "Blocked: Contro1 authentication is unavailable.")
+		return renderCodexHookDecision(input, false, "Blocked: Contro1 authentication is unavailable ("+err.Error()+").")
 	}
 	payload := buildCodexDeployPayload(input, command)
 	resp, err := c.Do("POST", "/api/centcom/v1/requests", payload)
 	if err != nil {
+		if asAgent {
+			return renderCodexHookDecision(input, false, "Blocked: the Codex agent's Contro1 connection could not create the approval request. Run contro1 doctor codex.")
+		}
 		return renderCodexHookDecision(input, false, "Blocked: Contro1 could not create the approval request.")
 	}
 	requestID := str(firstNonEmpty(resp["request_id"], resp["id"]))
@@ -167,6 +183,46 @@ func runCodexHook(_ *cobra.Command, _ []string) error {
 
 	infof("Approved by Contro1. Codex may run the exact reviewed command.")
 	return renderCodexHookDecision(input, true, "")
+}
+
+/*
+codexHookClient is who the hook asks Contro1 as: the Codex agent, when this
+computer has connected one with `contro1 connect codex`.
+
+WHY. The hook used the person's CLI sign-in, so a deploy Codex wanted to run
+reached the reviewer as the person's own request: the card could not say it
+was Codex, and it went to whoever reviews that person rather than to the
+agent's owner. The agent's connection says both, and it is already here. The
+person's sign-in is used only on a computer with no Codex connection, which is
+how the hook worked before. An explicitly configured agent token still wins,
+and a Codex connection that cannot be used fails closed rather than quietly
+asking as the person.
+*/
+func codexHookClient() (*client.Client, bool, error) {
+	viaEndpoint := func(raw string) (*client.Client, bool, error) {
+		ep, err := localipc.ParseEndpoint(raw)
+		if err != nil {
+			return nil, true, err
+		}
+		return client.NewWithHTTPClient(localipc.BaseURL, "", userAgent(), localipc.HTTPClient(ep, brokerServerPrincipal())), true, nil
+	}
+	if raw := resolveBrokerEndpoint(); raw != "" {
+		return viaEndpoint(raw)
+	}
+	if anyEnvTokenConfigured() {
+		c, _, err := newClient()
+		return c, false, err
+	}
+	conn, err := platforms.SelectLocalConnectionFor("codex", "")
+	switch {
+	case err == nil:
+		return viaEndpoint(conn.Endpoint)
+	case errors.Is(err, platforms.ErrNoLocalConnection):
+		c, _, err := newClient()
+		return c, false, err
+	default:
+		return nil, true, err
+	}
 }
 
 func buildCodexDeployPayload(input codexHookInput, command string) map[string]any {
@@ -214,17 +270,21 @@ func buildCodexDeployPayload(input codexHookInput, command string) map[string]an
 	if codexHookTarget != "" {
 		context["resource"] = codexHookTarget
 	}
+	role := strings.TrimSpace(codexHookRole)
+	routing := map[string]any{
+		"priority":    "urgent",
+		"sla_minutes": codexHookSLAMinutes,
+	}
+	if role != "" {
+		routing["required_role"] = role
+	}
 	payload := map[string]any{
 		"title":        "Approve production deploy from Codex?",
 		"description":  "Codex is blocked before executing the reviewed command.",
 		"request_type": "approval",
 		"source":       source,
-		"routing": map[string]any{
-			"required_role": codexHookRole,
-			"priority":      "urgent",
-			"sla_minutes":   codexHookSLAMinutes,
-		},
-		"context": context,
+		"routing":      routing,
+		"context":      context,
 		"continuation": map[string]any{
 			"mode":       "decision",
 			"expires_at": time.Now().Add(codexHookTimeout).UTC().Format(time.RFC3339),
@@ -246,17 +306,23 @@ func buildCodexDeployPayload(input codexHookInput, command string) map[string]an
 		},
 	}
 	if codexHookRequiredApprovals > 0 {
-		payload["approval_policy"] = map[string]any{
+		policy := map[string]any{
 			"mode":                   thresholdMode(codexHookRequiredApprovals),
 			"required_approvals":     codexHookRequiredApprovals,
-			"required_roles":         []string{codexHookRole},
 			"separation_of_duties":   true,
 			"fail_closed_on_timeout": true,
 		}
-		payload["approval_requirements"] = map[string]any{
+		requirements := map[string]any{
 			"required_approvals": codexHookRequiredApprovals,
-			"required_roles":     []string{codexHookRole},
 		}
+		// Named only when a role was asked for: an empty role list would be read
+		// as a role nobody holds.
+		if role != "" {
+			policy["required_roles"] = []string{role}
+			requirements["required_roles"] = []string{role}
+		}
+		payload["approval_policy"] = policy
+		payload["approval_requirements"] = requirements
 	}
 	return payload
 }

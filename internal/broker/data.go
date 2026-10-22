@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
 	"github.com/contro1-hq/contro1-cli/internal/localipc"
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 )
@@ -41,10 +42,32 @@ func newDataServer(b *Broker, localID string, l net.Listener) *dataServer {
 
 func (ds *dataServer) close() { _ = ds.srv.Close() }
 
+// connectionNotActive says why, and the one command that brings the agent back.
+// "Run contro1 status" left the person to work out that a connection ended in
+// Contro1 is not repaired, only made again.
+func connectionNotActive(en *brokerstore.Enrollment, err error) runtimeproto.Remediation {
+	out := runtimeproto.Remediation{Code: "CONNECTION_NOT_ACTIVE", PublicMessage: "This connection is not active on this computer.", Missing: "An active connection.", NextStep: "Run contro1 status to see what changed.", Retryable: false}
+	if err != nil || en == nil {
+		return out
+	}
+	again := "To connect it again: contro1 connect " + en.Platform
+	switch en.State {
+	case "revoked":
+		out.PublicMessage, out.NextStep = "This connection was disconnected in Contro1.", again
+	case "suspended":
+		out.PublicMessage, out.NextStep = "This connection is suspended in Contro1.", "Its owner can resume it on the agent's page in Contro1."
+	case "expired":
+		out.PublicMessage, out.NextStep = "This connection was not approved in time.", again
+	case "pending":
+		out.PublicMessage, out.NextStep = "This connection is still waiting for its owner to approve it.", "Approve it at the link contro1 connect printed, or run contro1 connect "+en.Platform+" again."
+	}
+	return out
+}
+
 func (ds *dataServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	en, err := ds.b.enrollment(ds.localID)
 	if err != nil || (en.State != "active") {
-		writeRemediation(w, 401, runtimeproto.Remediation{Code: "CONNECTION_NOT_ACTIVE", PublicMessage: "This connection is not active on this computer.", Missing: "An active connection.", NextStep: "Run contro1 status to see what changed.", Retryable: false})
+		writeRemediation(w, 401, connectionNotActive(en, err))
 		return
 	}
 	path := r.URL.Path

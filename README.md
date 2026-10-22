@@ -59,13 +59,8 @@ contro1 ask "Which region should I use?" --wait --format json
 contro1 evidence for-request <request_id>
 ```
 
-The CLI defaults to the hosted Contro1 (`https://api.contro1.com` / `https://contro1.com`),
-so no configuration is needed. To point at a local stack or a self-hosted instance:
-
-```bash
-contro1 config set api-url http://localhost:8080
-contro1 config set web-url http://localhost:3000
-```
+The CLI uses the hosted Contro1 (`https://api.contro1.com` / `https://contro1.com`),
+so no configuration is needed.
 
 ## What the CLI is for
 
@@ -164,19 +159,6 @@ contro1 ask "Which customer segment should I use?" --wait
 
 # Register a separate program under the agent that starts it (it inherits nothing)
 contro1 init --name "Invoice worker" --framework langgraph --parent agt_123
-```
-
-### Report every Claude Code tool call
-
-`contro1 activity hook` is a Claude Code hook: it reports each tool call to Contro1 from outside the model, one session per trace. With `--fail-closed`, a tool whose start could not be recorded is blocked (exit code 2).
-
-```json
-{
-  "hooks": {
-    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook --fail-closed" }] }],
-    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook" }] }]
-  }
-}
 ```
 
 ## Routing, Control Map and quorum
@@ -282,11 +264,10 @@ the reviewed hash. Secret-looking values are redacted from reviewer context.
 
 ```bash
 contro1 run \
-  --role cto \
   --risk critical \
   --environment production \
   --target billing-api \
-  --reason "Production deploys require CTO authorization" \
+  --reason "Production deploys require human authorization" \
   -- npm run deploy:production
 contro1 run \
   --agent agt_123 \
@@ -308,6 +289,12 @@ Try the safe [production deploy demo](examples/production-deploy/README.md).
 from stdin. It gates deploy-like Bash commands and declines to decide on normal
 tests, reads, and local development commands.
 
+On a computer that ran `contro1 connect codex`, the request is made as the Codex
+agent; otherwise with your CLI sign-in. Without `--role` it goes to the agent's
+reviewer (its owner) or the Action's approval policy, and a request from an
+agent with no owner goes to the admin routing inbox. Pass `--role <role>` only
+to require a reviewer role somebody in your organization holds.
+
 For a developer-controlled setup, copy
 [`examples/codex/convenience-hooks.json`](examples/codex/convenience-hooks.json)
 to a trusted project `.codex/hooks.json`, then use `/hooks` in Codex to review
@@ -318,6 +305,42 @@ For an organization-controlled setup, deploy
 your supported managed configuration channel and install the CLI at the absolute
 path referenced by the managed hook. The adapter fails closed on invalid policy,
 authentication failure, rejection, timeout, and Contro1 API failure.
+
+## Claude Code activity hook
+
+`contro1 activity hook` reports each Claude Code tool call to Contro1 from
+outside the model, one session per trace. Add it to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse":  [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook --fail-closed" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "contro1 activity hook" }] }]
+  }
+}
+```
+
+It reports as the Claude Code agent `contro1 connect claude-code` connected on
+this computer, found the same way `contro1 mcp serve` finds it (revoked,
+suspended and expired connections are skipped). Only a computer with more than
+one Claude Code connection needs `--agent <agent id>`; the error names the ids.
+An explicit `--broker-endpoint` or agent token still wins. With `--fail-closed`,
+a tool whose start could not be recorded is blocked (exit code 2).
+
+## The Contro1 service on this computer
+
+`contro1 connect` installs the Contro1 service (Windows service, macOS
+LaunchDaemon, Linux systemd unit) as a separate copy of `contro1`. When that copy
+is older than the CLI, or a different build, `contro1 connect` says "Update the
+Contro1 service (from X to Y)" in its preview and updates it in the same
+administrator approval as the rest of its work, then checks that the service
+answers as the new version. `contro1 disconnect` does the same in its one
+approval. Keys, connections and mappings are kept. A failed update puts the
+previous binary back.
+
+`contro1 doctor` prints `Contro1 service: version X (matches the CLI)`, or the
+command that updates it: `contro1 broker install` on Windows, `sudo <path to
+contro1> broker install` on macOS and Linux.
 
 ## Convenience versus non-bypassable enforcement
 

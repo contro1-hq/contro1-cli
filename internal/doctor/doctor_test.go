@@ -198,6 +198,18 @@ func TestWrongMapping(t *testing.T) {
 	}
 }
 
+// Every connection ended (disconnected or revoked in Contro1): the service
+// empties the mapping, and doctor must not call that "connected".
+func TestEmptyMappingIsNotConnected(t *testing.T) {
+	env := healthy()
+	env.mapping.Entries = nil
+	r := Run(context.Background(), env, "nanoclaw")
+	c := find(r, "mapping_complete")
+	if c.Status != runtimeproto.CheckRepairable || c.NextCommand != "contro1 connect nanoclaw" || r.State != "repairable" {
+		t.Fatalf("empty mapping: %+v state=%s", c, r.State)
+	}
+}
+
 func TestInaccessibleEndpoint(t *testing.T) {
 	env := healthy()
 	delete(env.principals, "ep-b")

@@ -134,14 +134,11 @@ func newRuntimeClient() (*client.Client, *config.Profile, string, error) {
 		if anyEnvTokenConfigured() {
 			return nil, nil, "", output.Errf(output.CodeUnsafeBlocked, "a Contro1 service endpoint and a runtime token are both configured").WithRemediation(&twoIdentitiesRemediation)
 		}
-		ep, err := localipc.ParseEndpoint(raw)
+		c, err := runtimeEndpointClient(raw)
 		if err != nil {
-			return nil, nil, "", output.Errf(output.CodeBadArgs, "%v", err)
+			return nil, nil, "", err
 		}
-		pr := &config.Profile{APIURL: localipc.BaseURL}
-		c := client.NewWithHTTPClient(localipc.BaseURL, "", userAgent(), localipc.HTTPClient(ep, brokerServerPrincipal()))
-		c.NetworkRemediation = &brokerUnreachableRemediation
-		return c, pr, "broker_endpoint", nil
+		return c, &config.Profile{APIURL: localipc.BaseURL}, "broker_endpoint", nil
 	}
 	_, pr, _, err := loadCtx()
 	if err != nil {
@@ -156,6 +153,18 @@ func newRuntimeClient() (*client.Client, *config.Profile, string, error) {
 		return nil, nil, "", err
 	}
 	return client.New(apiURL, token, userAgent()), pr, source, nil
+}
+
+// runtimeEndpointClient speaks through one agent's local endpoint on the
+// Contro1 service, which holds that agent's credential.
+func runtimeEndpointClient(raw string) (*client.Client, error) {
+	ep, err := localipc.ParseEndpoint(raw)
+	if err != nil {
+		return nil, output.Errf(output.CodeBadArgs, "%v", err)
+	}
+	c := client.NewWithHTTPClient(localipc.BaseURL, "", userAgent(), localipc.HTTPClient(ep, brokerServerPrincipal()))
+	c.NetworkRemediation = &brokerUnreachableRemediation
+	return c, nil
 }
 
 // requireRuntimeStatus confirms the credential is an agent-bound runtime

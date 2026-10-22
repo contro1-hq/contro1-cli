@@ -46,11 +46,11 @@ func TestBuildCodexDeployPayloadSeparatesProvenance(t *testing.T) {
 		codexHookRole, codexHookRisk, codexHookEnvironment, codexHookTarget, codexHookReason, codexHookSetup = oldRole, oldRisk, oldEnvironment, oldTarget, oldReason, oldSetup
 		codexHookSLAMinutes, codexHookRequiredApprovals, codexHookTimeout = oldSLA, oldApprovals, oldTimeout
 	})
-	codexHookRole = "cto"
+	codexHookRole = "release-manager"
 	codexHookRisk = "critical"
 	codexHookEnvironment = "production"
 	codexHookTarget = "billing-api"
-	codexHookReason = "Production deploy requires CTO approval"
+	codexHookReason = "Production deploy requires release manager approval"
 	codexHookSetup = "enterprise"
 	codexHookSLAMinutes = 10
 	codexHookRequiredApprovals = 2
@@ -82,8 +82,39 @@ func TestBuildCodexDeployPayloadSeparatesProvenance(t *testing.T) {
 	if policy["required_approvals"] != 2 || policy["mode"] != "threshold" {
 		t.Fatalf("unexpected approval policy: %#v", policy)
 	}
+	if roles, _ := policy["required_roles"].([]string); len(roles) != 1 || roles[0] != "release-manager" {
+		t.Fatalf("a role asked for must be required: %#v", policy)
+	}
+	if asMap(payload["routing"])["required_role"] != "release-manager" {
+		t.Fatalf("a role asked for must route: %#v", payload["routing"])
+	}
 	if _, err := json.Marshal(payload); err != nil {
 		t.Fatalf("payload is not JSON serializable: %v", err)
+	}
+}
+
+// Without --role nothing names a role, so the server routes the request to the
+// agent's reviewer or the action's approval policy. A built-in "cto" sent it to
+// a role most organizations do not have.
+func TestBuildCodexDeployPayloadWithoutRoleNamesNone(t *testing.T) {
+	oldRole, oldApprovals := codexHookRole, codexHookRequiredApprovals
+	t.Cleanup(func() { codexHookRole, codexHookRequiredApprovals = oldRole, oldApprovals })
+	codexHookRole = ""
+	codexHookRequiredApprovals = 1
+
+	payload := buildCodexDeployPayload(codexHookInput{SessionID: "s", ToolName: "Bash", ToolInput: map[string]any{"command": "npm run deploy"}}, "npm run deploy")
+	if _, ok := asMap(payload["routing"])["required_role"]; ok {
+		t.Fatalf("no role was asked for, yet routing names one: %#v", payload["routing"])
+	}
+	if _, ok := asMap(payload["approval_policy"])["required_roles"]; ok {
+		t.Fatalf("approval_policy names roles: %#v", payload["approval_policy"])
+	}
+	if _, ok := asMap(payload["approval_requirements"])["required_roles"]; ok {
+		t.Fatalf("approval_requirements names roles: %#v", payload["approval_requirements"])
+	}
+	encoded, _ := json.Marshal(payload)
+	if strings.Contains(string(encoded), "cto") {
+		t.Fatalf("payload still carries the old default role: %s", encoded)
 	}
 }
 

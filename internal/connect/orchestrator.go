@@ -113,6 +113,26 @@ type Broker interface {
 	SetPrincipals(ctx context.Context, apiURL string, updates []broker.ControlPrincipalUpdate) error
 }
 
+/*
+ServiceUpdater is the part of a Broker that keeps the installed Contro1 service
+on this CLI's binary. Optional: a Broker without it is never updated.
+
+WHY. The service was replaced only by the elevated install step, and that ran
+only when connect had new agents to register, so a computer connected once
+kept its first service for good while the CLI moved on. The update is said in
+the preview like every other change, and it rides on the elevation this run
+asks for anyway; a run with nothing else to elevate for asks once, for it.
+*/
+type ServiceUpdater interface {
+	// PendingServiceUpdate is the preview line, "" when no update is due.
+	PendingServiceUpdate() string
+	// UpdateService updates the service in an elevated phase of its own.
+	UpdateService(ctx context.Context, apiURL string) error
+	// ServiceUpdateResult is what the last elevated phase did about the
+	// update: a line when it worked, or why it did not.
+	ServiceUpdateResult() (string, error)
+}
+
 type Verifier interface {
 	RuntimeStatus(ctx context.Context, e runtimeproto.MappingEntry) (agentID string, endpointMode string, err error)
 	ControlMapPreview(ctx context.Context, e runtimeproto.MappingEntry) error
@@ -312,6 +332,8 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			plan := installer.Plan(hostGOOS(opts), installer.Options{APIURL: opts.APIURL})
 			if !o.Broker.Healthy(ctx) {
 				lines = append(lines, plan.Summary...)
+			} else if line := o.pendingServiceUpdate(opts); line != "" {
+				lines = append(lines, line)
 			}
 		}
 		for _, c := range o.Adapter.PlanConfig(o.Broker.MappingPath(p)) {
@@ -396,6 +418,17 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			// Everything is already connected; this is a repair run.
 			st.Registered = true
 			save("registered")
+			// Nothing to register means no elevation, so a due service
+			// update asks for its own: once. A --principal repair asks for
+			// one below and the update rides on that instead.
+			if u, ok := o.Broker.(ServiceUpdater); ok && o.pendingServiceUpdate(opts) != "" && !(opts.Repair && opts.Principal != "") {
+				o.Prompt.Progress("Updating the Contro1 service on this computer (administrator approval required)...")
+				if err := u.UpdateService(ctx, opts.APIURL); err != nil {
+					o.Prompt.Progress("The Contro1 service was not updated: " + err.Error())
+				} else {
+					o.reportServiceUpdate()
+				}
+			}
 		} else {
 			st.BatchID, st.BatchExpiresAt, st.Items, st.Registered = prepared.BatchID, prepared.ExpiresAt, prepared.Items, false
 			save("prepared")
@@ -419,7 +452,11 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 				}
 				creq.Items = append(creq.Items, broker.ControlItem{ItemID: it.ItemID, AgentID: it.AgentID, EnrollmentID: it.EnrollmentID, Platform: p, PlatformInstanceDigest: instance.Digest, PlatformSubject: it.PlatformSubject, DisplayName: displayFor(subjects, it.PlatformSubject), EndpointMode: runtimeproto.ModeApprovalsOnly, AllowedPrincipals: []string{principal}})
 			}
+			if line := o.pendingServiceUpdate(opts); line != "" {
+				o.Prompt.Progress("In the same approval: " + strings.ToLower(line[:1]) + line[1:] + ".")
+			}
 			results, err := o.Broker.Register(ctx, opts.APIURL, creq)
+			o.reportServiceUpdate()
 			if errors.Is(err, installer.ErrElevationDeclined) || errors.Is(err, installer.ErrNeedsElevation) {
 				ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Registering an agent key with the local Contro1 service needs an administrator on this computer. The service itself may already be running: its control channel refuses unelevated callers by design.")
 				ns.WaitingFor = &runtimeproto.WaitingFor{Kind: "local_administrator"}
@@ -554,7 +591,9 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 		}
 		if len(updates) > 0 {
 			o.Prompt.Progress("Changing who can reach these agents' endpoints...")
-			if err := o.Broker.SetPrincipals(ctx, opts.APIURL, updates); err != nil {
+			err := o.Broker.SetPrincipals(ctx, opts.APIURL, updates)
+			o.reportServiceUpdate()
+			if err != nil {
 				if errors.Is(err, installer.ErrElevationDeclined) || errors.Is(err, installer.ErrNeedsElevation) {
 					ns := step(p, runtimeproto.StateNeedsLocalConfirmation, "Changing who can reach the agents needs administrator approval on this computer.")
 					ns.WaitingFor = &runtimeproto.WaitingFor{Kind: "local_administrator"}
@@ -815,11 +854,43 @@ func instanceLabel(p string) string {
 		return "NanoClaw"
 	case "claude-code":
 		return "Claude Code"
+	case "cursor":
+		return "Cursor"
+	case "codex":
+		return "Codex"
 	}
 	return p
 }
 
 // hostGOOS is overridable in tests through HostOS.
+// pendingServiceUpdate is the preview line for a due service update, or "".
+// A development service is the person's own foreground process: never.
+func (o *Orchestrator) pendingServiceUpdate(opts Options) string {
+	u, ok := o.Broker.(ServiceUpdater)
+	if !ok || opts.Development {
+		return ""
+	}
+	return u.PendingServiceUpdate()
+}
+
+// reportServiceUpdate says what the last elevated phase did about the update.
+// A failed update never fails the run: the previous service is put back and
+// the agents keep working on it.
+func (o *Orchestrator) reportServiceUpdate() {
+	u, ok := o.Broker.(ServiceUpdater)
+	if !ok {
+		return
+	}
+	done, err := u.ServiceUpdateResult()
+	if err != nil {
+		o.Prompt.Progress("The Contro1 service was not updated: " + err.Error())
+		return
+	}
+	if done != "" {
+		o.Prompt.Progress(done)
+	}
+}
+
 func hostGOOS(opts Options) string {
 	if opts.HostOS != "" {
 		return opts.HostOS

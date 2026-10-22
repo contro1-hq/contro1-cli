@@ -38,6 +38,24 @@ type McpInstaller interface {
 	InstallMcp(ctx context.Context, subjects []string, j *Journal) (McpOutcome, error)
 }
 
+/*
+McpRemover is a platform where disconnect removes the Contro1 MCP server that
+connect installed.
+
+WHY. Disconnecting revoked the agent and left its MCP entry, so the client
+kept starting `contro1 mcp serve --agent <revoked agent>` and showed a refusal
+on every call. Only an entry that names one of the disconnected agents is
+removed; an entry for someone else, or one the person wrote without --agent, is
+theirs and stays. It is shown before it happens and confirmed like connect's
+changes.
+*/
+type McpRemover interface {
+	// McpRemovalChanges previews the removal. Empty when nothing names these
+	// subjects. Never writes.
+	McpRemovalChanges(ctx context.Context, subjects []string) []Change
+	RemoveMcp(ctx context.Context, subjects []string, j *Journal) (McpOutcome, error)
+}
+
 // McpOutcome is what the MCP step did and what it could not do for the person.
 type McpOutcome struct {
 	// Done is said as progress.
@@ -404,6 +422,39 @@ func (c *claudeCode) InstallMcp(ctx context.Context, subjects []string, j *Journ
 	}
 	j.RoleCommands = append(j.RoleCommands, "claude "+strings.Join(args, " "))
 	out.Done = append(out.Done, "Registered the Contro1 MCP server with Claude Code. New sessions load it; a session already open needs a restart.")
+	return out, nil
+}
+
+func (c *claudeCode) McpRemovalChanges(ctx context.Context, subjects []string) []Change {
+	current, found, err := c.registeredMcp(ctx)
+	if err != nil || !found || !servesAny(current, subjects) {
+		return nil
+	}
+	if current.Scope == "project" {
+		return []Change{{Kind: "mcp", Description: "Claude Code's Contro1 MCP server for this agent is in this project's .mcp.json, which is shared with the project, so it stays: remove contro1 from .mcp.json yourself", Before: current.Describe()}}
+	}
+	return []Change{{Kind: "mcp", Description: "Remove Claude Code's Contro1 MCP server for this agent", Before: current.Describe(), After: "claude mcp remove --scope " + scopeOr(current.Scope) + " " + claudeMcpName}}
+}
+
+func (c *claudeCode) RemoveMcp(ctx context.Context, subjects []string, j *Journal) (McpOutcome, error) {
+	var out McpOutcome
+	current, found, err := c.registeredMcp(ctx)
+	if errors.Is(err, errNoClaude) {
+		return out, nil
+	}
+	if err != nil || !found || !servesAny(current, subjects) {
+		return out, err
+	}
+	if current.Scope == "project" {
+		out.ToDo = append(out.ToDo, "Remove contro1 from this project's .mcp.json: it still runs "+current.Describe()+", which was disconnected.")
+		return out, nil
+	}
+	args := []string{"mcp", "remove", "--scope", scopeOr(current.Scope), claudeMcpName}
+	if _, err := c.opts.Runner(ctx, "claude", args...); err != nil {
+		return out, fmt.Errorf("claude %s: %v", strings.Join(args, " "), err)
+	}
+	j.RoleCommands = append(j.RoleCommands, "claude "+strings.Join(args, " "))
+	out.Done = append(out.Done, "Removed the Contro1 MCP server from Claude Code.")
 	return out, nil
 }
 

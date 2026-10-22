@@ -83,9 +83,22 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 	steps = append(steps, Step{
 		ID: "binary",
 		Do: func() error {
+			if err := keepPrevious(plan.Binary.Dest); err != nil {
+				return err
+			}
 			return run("install", binaryInstallArgs(runtime.GOOS, plan.Binary.Source, plan.Binary.Dest)...)
 		},
-		Undo: func() error { return os.Remove(plan.Binary.Dest) },
+		Undo: func() error {
+			// A failed upgrade puts the working binary back and restarts the
+			// service on it, instead of leaving no service at all.
+			if restorePrevious(plan.Binary.Dest) {
+				if runtime.GOOS == "darwin" {
+					return run("launchctl", "kickstart", "-k", "system/com.contro1.broker")
+				}
+				return run("systemctl", "restart", "contro1-broker.service")
+			}
+			return os.Remove(plan.Binary.Dest)
+		},
 	})
 	for _, f := range plan.Files {
 		f := f
@@ -112,13 +125,20 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 	} else {
 		steps = append(steps,
 			Step{ID: "daemon-reload", Do: func() error { return run("systemctl", "daemon-reload") }},
-			Step{ID: "enable", Do: func() error { return run("systemctl", "enable", "--now", "contro1-broker.service") },
+			// Existed on an upgrade: a rollback of a failed update must not
+			// disable the service the computer already had.
+			Step{ID: "enable",
+				Existed: func() (bool, error) {
+					return exec.Command("systemctl", "is-enabled", "--quiet", "contro1-broker.service").Run() == nil, nil
+				},
+				Do:   func() error { return run("systemctl", "enable", "--now", "contro1-broker.service") },
 				Undo: func() error { return run("systemctl", "disable", "--now", "contro1-broker.service") }},
 			// enable --now leaves an already running service on the OLD binary after
 			// an upgrade replaced it; restart starts it on the new one either way.
 			Step{ID: "restart", Do: func() error { return run("systemctl", "restart", "contro1-broker.service") }},
 		)
 	}
+	steps = append(steps, Step{ID: "binary-cleanup", Do: func() error { dropPrevious(plan.Binary.Dest); return nil }})
 	return steps, nil
 }
 

@@ -146,9 +146,17 @@ func New(platform string, opts Options) (Adapter, error) {
 		return &nanoClaw{opts: opts}, nil
 	case "claude-code":
 		return &claudeCode{opts: opts}, nil
+	case "cursor":
+		return newCursor(opts), nil
+	case "codex":
+		return newCodex(opts), nil
 	}
-	return nil, fmt.Errorf("unsupported platform %q (openclaw, nanoclaw, claude-code)", platform)
+	return nil, fmt.Errorf("unsupported platform %q (%s)", platform, strings.Join(Supported, ", "))
 }
+
+// Supported is every platform `contro1 connect` knows, in the order commands
+// list them.
+var Supported = []string{"openclaw", "nanoclaw", "claude-code", "cursor", "codex"}
 
 // currentPrincipal is the default caller identity: the person running connect,
 // who also runs the platform.

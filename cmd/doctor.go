@@ -2,18 +2,23 @@ package cmd
 
 import (
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/contro1-hq/contro1-cli/internal/brokerpaths"
 	"github.com/contro1-hq/contro1-cli/internal/client"
 	"github.com/contro1-hq/contro1-cli/internal/config"
+	"github.com/contro1-hq/contro1-cli/internal/doctor"
+	"github.com/contro1-hq/contro1-cli/internal/installer"
 	"github.com/contro1-hq/contro1-cli/internal/output"
+	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 	"github.com/spf13/cobra"
 )
 
 func init() {
 	doctorRoot := &cobra.Command{
-		Use:     "doctor [openclaw|nanoclaw|claude-code]",
+		Use:     "doctor [openclaw|nanoclaw|claude-code|cursor|codex]",
 		Short:   "Diagnose connectivity, authentication and scopes; with a platform, its Contro1 connections",
 		GroupID: groupCore,
 		Args:    cobra.MaximumNArgs(1),
@@ -52,6 +57,14 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 	add("API reachable", httpReachable(strings.TrimRight(apiURL, "/")+"/health"), apiURL)
 	if pr.WebURL != "" {
 		add("Web reachable", httpReachable(pr.WebURL), pr.WebURL)
+	}
+
+	// The installed Contro1 service, when this computer has one: which
+	// version runs, and the command that updates it when it is behind.
+	if installed, _, _, _ := installer.ServiceStatus(); installed {
+		c, _, _ := compareInstalledService(brokerpaths.Production(runtime.GOOS))
+		check := doctor.ServiceVersionCheck(c, serviceUpdateCommand())
+		add(check.Label, check.Status == runtimeproto.CheckOK || c.Newer, strings.TrimSuffix(check.Message, "."))
 	}
 
 	// auth

@@ -18,7 +18,7 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "/usr/local/bin/contro1 hooks codex --role cto --environment production --setup enterprise"
-command_windows = 'C:\Program Files\Contro1\contro1.exe hooks codex --role cto --environment production --setup enterprise'
+command = "/usr/local/bin/contro1 hooks codex --environment production --setup enterprise"
+command_windows = 'C:\Program Files\Contro1\contro1.exe hooks codex --environment production --setup enterprise'
 timeout = 910
 statusMessage = "Waiting for enterprise production deploy approval"

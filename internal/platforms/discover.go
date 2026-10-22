@@ -53,6 +53,88 @@ rather than failing the whole listing: one damaged file must not hide the
 connections that are fine. It is reported so a caller can say so.
 */
 func LocalConnections() ([]LocalConnection, []error) {
+	all, problems := publishedConnections()
+	inactive := inactiveEnrollments(PlatformsDir())
+	out := all[:0:0]
+	for _, c := range all {
+		if _, gone := inactive[c.EnrollmentID]; !gone || c.EnrollmentID == "" {
+			out = append(out, c)
+		}
+	}
+	return out, problems
+}
+
+/*
+inactiveEnrollments reads which published connections the Contro1 service on
+this computer itself reports as no longer active (revoked, suspended, expired),
+keyed by enrollment id to that state.
+
+WHY. A real Codex test: `contro1 disconnect codex` revoked the connection in
+Contro1 and left the mapping file, and `contro1 mcp serve` kept picking the
+revoked agent and was refused on every call. The mapping is rewritten by the
+service, and only when it notices; an older service, or one that has not
+refreshed yet, keeps publishing an entry that can no longer work. status.json
+is the same service's own secret-free account of each connection, so an entry
+it calls revoked is treated as absent: `mcp serve` then behaves exactly as if
+it had never been there (the only other agent, a person sign-in, or the setup
+message), instead of insisting on a dead identity.
+
+Only what the service says counts. No status, or a connection it does not
+list, keeps the entry: guessing a connection away would silently move an agent
+onto a person sign-in, which is the downgrade this whole selection avoids.
+*/
+func inactiveEnrollments(dir string) map[string]string {
+	raw, err := os.ReadFile(filepath.Join(dir, "status.json"))
+	if err != nil {
+		return nil
+	}
+	var status struct {
+		Enrollments []struct {
+			EnrollmentID string `json:"enrollment_id"`
+			State        string `json:"state"`
+		} `json:"enrollments"`
+	}
+	if json.Unmarshal(raw, &status) != nil {
+		return nil
+	}
+	active := map[string]bool{}
+	out := map[string]string{}
+	for _, e := range status.Enrollments {
+		if e.EnrollmentID == "" {
+			continue
+		}
+		if e.State == "active" {
+			active[e.EnrollmentID] = true
+			continue
+		}
+		if e.State != "" && e.State != "pending" {
+			out[e.EnrollmentID] = e.State
+		}
+	}
+	// A reconnect that reused the id is active again; active wins.
+	for id := range active {
+		delete(out, id)
+	}
+	return out
+}
+
+// InactiveLocalConnections are the published connections the service reports
+// as no longer active, with that state, so a caller can say why one it was
+// asked for is not used.
+func InactiveLocalConnections() map[LocalConnection]string {
+	all, _ := publishedConnections()
+	inactive := inactiveEnrollments(PlatformsDir())
+	out := map[LocalConnection]string{}
+	for _, c := range all {
+		if state, gone := inactive[c.EnrollmentID]; gone && c.EnrollmentID != "" {
+			out[c] = state
+		}
+	}
+	return out
+}
+
+// publishedConnections is every entry in every mapping file, active or not.
+func publishedConnections() ([]LocalConnection, []error) {
 	dir := PlatformsDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -159,6 +241,10 @@ func ClientPlatform(getenv func(string) string) string {
 // is an ordinary state and not a failure: nobody has run `contro1 connect` yet.
 var ErrNoLocalConnection = errors.New("no Contro1 connection is published on this computer")
 
+// ErrInactiveConnection is a named connection the service reports revoked,
+// suspended or expired.
+var ErrInactiveConnection = errors.New("connection not active")
+
 // AmbiguousConnectionError is returned when a selector is needed. It carries the
 // candidates so the caller can print them rather than making the person go
 // looking for ids.
@@ -216,6 +302,11 @@ func SelectLocalConnectionFor(platform, selector string) (LocalConnection, error
 		for _, c := range connections {
 			if c.AgentID == selector || c.PlatformSubject == selector {
 				return c, nil
+			}
+		}
+		for c, state := range InactiveLocalConnections() {
+			if (platform == "" || c.Platform == platform) && (c.AgentID == selector || c.PlatformSubject == selector) {
+				return LocalConnection{}, fmt.Errorf("the connection for %q is %s on this computer; run contro1 connect %s to connect it again: %w", selector, state, c.Platform, ErrInactiveConnection)
 			}
 		}
 		if len(connections) == 0 {

@@ -3,8 +3,6 @@
 package installer
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -65,9 +63,19 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 			if err := stopServiceIfRunning(); err != nil {
 				return err
 			}
+			if err := keepPrevious(plan.Binary.Dest); err != nil {
+				return err
+			}
 			return copyFile(plan.Binary.Source, plan.Binary.Dest)
 		},
-		Undo: func() error { return os.Remove(plan.Binary.Dest) },
+		Undo: func() error {
+			// An upgrade that failed later puts the working binary back and
+			// starts it, so a failed update never leaves no service at all.
+			if restorePrevious(plan.Binary.Dest) {
+				return startServiceIfStopped()
+			}
+			return os.Remove(plan.Binary.Dest)
+		},
 	})
 	steps = append(steps, Step{
 		ID: "service",
@@ -130,7 +138,28 @@ func (SystemRunner) Steps(plan InstallPlan) ([]Step, error) {
 			return s.Start()
 		},
 	})
+	steps = append(steps, Step{ID: "binary-cleanup", Do: func() error { dropPrevious(plan.Binary.Dest); return nil }})
 	return steps, nil
+}
+
+// startServiceIfStopped starts the service again after a rollback put its
+// previous binary back.
+func startServiceIfStopped() error {
+	st, err := serviceState()
+	if err != nil || st == svc.Running {
+		return nil
+	}
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(brokerpaths.ServiceName)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	return s.Start()
 }
 
 // ErrNeedsElevation: run the phase again elevated (RunElevated).
@@ -250,19 +279,6 @@ func sameFile(a, b string) bool {
 	ha, errA := fileHash(a)
 	hb, errB := fileHash(b)
 	return errA == nil && errB == nil && ha == hb
-}
-
-func fileHash(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func copyFile(src, dst string) error {

@@ -40,7 +40,7 @@ var (
 )
 
 var connectCmd = &cobra.Command{
-	Use:     "connect <openclaw|nanoclaw|claude-code>",
+	Use:     "connect <openclaw|nanoclaw|claude-code|cursor|codex>",
 	Short:   "Connect the agents on this computer to Contro1, approved by their owner",
 	GroupID: groupAgent,
 	Long: `Finds the agents on this computer, asks their accountable owner to approve
@@ -49,12 +49,12 @@ them once, sets up the Contro1 service, and points the platform at it.
 Re-running is safe: it repairs what drifted and never creates duplicates.
 With --format json every result is a next-step object for automation.`,
 	Args:      cobra.ExactArgs(1),
-	ValidArgs: []string{"openclaw", "nanoclaw", "claude-code"},
+	ValidArgs: platforms.Supported,
 	RunE:      runConnect,
 }
 
 var disconnectCmd = &cobra.Command{
-	Use:     "disconnect <openclaw|nanoclaw|claude-code>",
+	Use:     "disconnect <openclaw|nanoclaw|claude-code|cursor|codex>",
 	Short:   "Disconnect this computer's agents from Contro1",
 	GroupID: groupAgent,
 	Args:    cobra.ExactArgs(1),
@@ -62,7 +62,7 @@ var disconnectCmd = &cobra.Command{
 }
 
 var connectionStatusCmd = &cobra.Command{
-	Use:     "status [openclaw|nanoclaw|claude-code]",
+	Use:     "status [openclaw|nanoclaw|claude-code|cursor|codex]",
 	Short:   "Show whether each connected agent is ready, with the next step",
 	GroupID: groupAgent,
 	Args:    cobra.MaximumNArgs(1),
@@ -88,8 +88,10 @@ var brokerRegisterCmd = &cobra.Command{
 func init() {
 	for _, c := range []*cobra.Command{connectCmd, disconnectCmd, connectionStatusCmd} {
 		c.Flags().BoolVar(&flagConnectDevelopment, "development", false, "use a foreground development Contro1 service (not for production agents)")
-		c.Flags().StringVar(&flagConnectBin, "platform-cli", "", "platform CLI to use for discovery (openclaw or ncl path)")
-		c.Flags().StringVar(&flagConnectConfigDir, "platform-config-dir", "", "where to write the platform's Contro1 settings")
+		// Ours, for working on the CLI itself: nobody connecting an agent needs it.
+		_ = c.Flags().MarkHidden("development")
+		c.Flags().StringVar(&flagConnectBin, "platform-cli", "", "platform CLI to use (openclaw, ncl or codex path)")
+		c.Flags().StringVar(&flagConnectConfigDir, "platform-config-dir", "", "where the platform's Contro1 settings are (for cursor and codex: the folder holding mcp.json or config.toml)")
 	}
 	connectCmd.Flags().StringVar(&flagConnectOwner, "owner", "", "accountable owner's email (default: you)")
 	connectCmd.Flags().StringVar(&flagConnectResume, "resume", "", "continue a connection that is waiting (con_...)")
@@ -101,8 +103,9 @@ func init() {
 	connectCmd.Flags().StringVar(&flagConnectPrincipal, "principal", "", "operating system identity the platform runs as (default: you)")
 	connectCmd.Flags().StringArrayVar(&flagConnectAgents, "agent", nil, "platform agent or group id to connect (repeatable; skips discovery)")
 	disconnectCmd.Flags().BoolVar(&flagDisconnectRemote, "revoke-remote", true, "also revoke the connections in Contro1")
-	disconnectCmd.Flags().BoolVar(&flagDisconnectLocalOnly, "local-only", false, "only remove local settings and endpoints")
+	disconnectCmd.Flags().BoolVar(&flagDisconnectLocalOnly, "local-only", false, "only remove this computer's settings, endpoints and mapping; leave the connections in Contro1")
 	disconnectCmd.Flags().BoolVar(&flagDisconnectDryRun, "dry-run", false, "show what would be removed")
+	disconnectCmd.Flags().BoolVar(&flagConnectYes, "yes", false, "also remove the Contro1 MCP server connect installed, without asking")
 	brokerRegisterCmd.Flags().StringVar(&flagPhaseFile, "phase-file", "", "phase file written by contro1 connect")
 	brokerCmd.AddCommand(brokerRegisterCmd)
 	rootCmd.AddCommand(connectCmd, disconnectCmd, connectionStatusCmd)
@@ -209,7 +212,7 @@ func mappingPathsFor(platform string) []string {
 		return []string{layout.PlatformsDir + string(os.PathSeparator) + platform + ".json"}
 	}
 	var out []string
-	for _, p := range []string{"openclaw", "nanoclaw", "claude-code"} {
+	for _, p := range platforms.Supported {
 		out = append(out, layout.PlatformsDir+string(os.PathSeparator)+p+".json")
 	}
 	return out
@@ -243,7 +246,7 @@ func runConnectionStatus(cmd *cobra.Command, args []string) error {
 		byAgent[agents[i].AgentID] = &agents[i]
 	}
 	if len(agents) == 0 {
-		ns := runtimeproto.NextStep{SchemaVersion: runtimeproto.SchemaVersion, State: runtimeproto.StateBlocked, Platform: platform, Message: "No agents are connected on this computer.", NextCommand: "contro1 connect <openclaw|nanoclaw|claude-code>"}
+		ns := runtimeproto.NextStep{SchemaVersion: runtimeproto.SchemaVersion, State: runtimeproto.StateBlocked, Platform: platform, Message: "No agents are connected on this computer.", NextCommand: "contro1 connect <openclaw|nanoclaw|claude-code|cursor|codex>"}
 		return renderNextStep(ns)
 	}
 
@@ -320,44 +323,96 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return output.Errf(output.CodeBadArgs, "%v", err)
 	}
+	ctx := cmd.Context()
 	paths := mappingPathsFor(platform)
 	m, _ := platforms.ReadMapping(paths[0])
 	st, _ := fileStates{}.Load(platform)
 	preview := map[string]any{"platform": platform, "mapping_file": paths[0]}
+	var subjects []string
 	if m != nil {
-		var subjects []string
 		for _, e := range m.Entries {
 			subjects = append(subjects, e.PlatformSubject)
 		}
 		preview["agents"] = subjects
 	}
+	if len(subjects) == 0 {
+		// Nothing published any more (an older disconnect, or the service
+		// already dropped it): the MCP entry may still name this computer's
+		// agent, so it is looked for by the subject connect would use.
+		if _, found, err := adapter.Discover(ctx); err == nil {
+			for _, s := range found {
+				subjects = append(subjects, s.ID)
+			}
+		}
+	}
 	if st != nil {
 		preview["settings_to_remove"] = st.Journal.CreatedFiles
 		preview["settings_kept"] = st.Journal.WrittenFiles
 	}
+	remover, _ := adapter.(platforms.McpRemover)
+	var mcpChanges []platforms.Change
+	if remover != nil && len(subjects) > 0 {
+		mcpChanges = remover.McpRemovalChanges(ctx, subjects)
+	}
+	var mcpLines []string
+	for _, c := range mcpChanges {
+		line := c.Description
+		if c.Before != "" {
+			line += " (now: " + c.Before + ")"
+		}
+		if c.After != "" {
+			line += ": " + c.After
+		}
+		mcpLines = append(mcpLines, line)
+	}
+	preview["mcp_to_remove"] = mcpLines
 	preview["revoke_in_contro1"] = !flagDisconnectLocalOnly && flagDisconnectRemote
+	// An old service is updated in the same approval the revoke asks for. The
+	// revoke itself does not need it (see runRegisterPhase); a current service
+	// also keeps the mapping right by itself afterwards.
+	service := newServiceBroker(flagConnectDevelopment)
+	updateLine := ""
+	if m != nil && len(m.Entries) > 0 {
+		updateLine = service.PendingServiceUpdate()
+	}
+	if updateLine != "" {
+		preview["service_update"] = updateLine
+	}
 	if flagDisconnectDryRun {
 		if connectFormatJSON() {
 			return output.Render("json", preview, nil)
 		}
 		fmt.Printf("Disconnecting %s would:\n", platform)
-		if a, ok := preview["agents"].([]string); ok {
-			fmt.Printf("  - stop the endpoints for: %s\n", strings.Join(a, ", "))
+		if m != nil && len(m.Entries) > 0 {
+			fmt.Printf("  - stop the endpoints for: %s, and remove them from this computer's Contro1 service\n", strings.Join(preview["agents"].([]string), ", "))
 		}
 		if st != nil {
 			for _, f := range st.Journal.CreatedFiles {
 				fmt.Printf("  - remove %s\n", f)
 			}
 		}
-		if preview["revoke_in_contro1"] == true {
+		for _, l := range mcpLines {
+			fmt.Printf("  - %s (asks first; --yes to skip the question)\n", l)
+		}
+		if preview["revoke_in_contro1"] == true && m != nil {
 			fmt.Println("  - revoke these connections in Contro1 (the agents and their history stay)")
+		}
+		if updateLine != "" {
+			fmt.Printf("  - %s, in the same administrator approval\n", lowerFirst(updateLine))
 		}
 		fmt.Println("  The Contro1 service stays installed while other platforms use it.")
 		return nil
 	}
 
+	// Asked before anything changes, so a "no" leaves a consistent state.
+	removeMcp := false
+	if len(mcpChanges) > 0 {
+		prompt := terminalPrompt{json: connectFormatJSON()}
+		removeMcp = flagConnectYes || (prompt.Interactive() && prompt.Confirm("Also remove the Contro1 MCP server that connect installed?", mcpLines))
+	}
+
 	var problems []string
-	if m != nil && !flagDisconnectLocalOnly && flagDisconnectRemote {
+	if m != nil && len(m.Entries) > 0 && !flagDisconnectLocalOnly && flagDisconnectRemote {
 		c, _, err := newClient()
 		if err != nil {
 			return output.Errf(output.CodeAuth, "sign in with contro1 auth login to revoke in Contro1, or use --local-only")
@@ -368,21 +423,53 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	// Local endpoints stop by themselves once the server revokes; in
-	// development the control pipe also removes local state immediately.
-	if flagConnectDevelopment && m != nil {
-		layout := brokerpaths.Development()
-		if resp, err := controlCall(cmd.Context(), layout, "GET", "/control/v1/enrollments", nil); err == nil {
-			for _, raw := range asSlice(resp["enrollments"]) {
-				en := asMap(raw)
-				if str(en["platform"]) == platform {
-					_, _ = controlCall(cmd.Context(), layout, "POST", "/control/v1/enrollments/"+str(en["local_id"])+"/revoke", map[string]bool{"remote": false})
-				}
+	/*
+	 * Then this computer's side: the service stops the endpoints, deletes the
+	 * keys and republishes the mapping without these agents. Without it the
+	 * mapping kept naming a revoked agent and `contro1 mcp serve` kept choosing
+	 * it. In production the mapping is the service's, so this is the one
+	 * administrator approval disconnect asks for.
+	 */
+	if m != nil && len(m.Entries) > 0 {
+		if !flagConnectDevelopment {
+			msg := fmt.Sprintf("Removing %s from the Contro1 service on this computer. It asks for administrator approval.", platform)
+			if updateLine != "" {
+				msg += " The same approval also does this: " + lowerFirst(updateLine) + "."
 			}
+			output.Info("%s", msg)
+		}
+		if err := service.RevokeLocal(ctx, "", platform); err != nil {
+			problems = append(problems, fmt.Sprintf("the Contro1 service on this computer still lists %s (%v). Run contro1 disconnect %s --local-only and approve the administrator prompt", platform, err, platform))
+		}
+		if done, err := service.ServiceUpdateResult(); err != nil {
+			output.Info("The Contro1 service was not updated: %v", err)
+		} else if done != "" {
+			output.Info("%s", done)
+		}
+	}
+	journal := &platforms.Journal{}
+	if st != nil {
+		journal = &st.Journal
+	}
+	switch {
+	case removeMcp:
+		outcome, err := remover.RemoveMcp(ctx, subjects, journal)
+		for _, line := range outcome.Done {
+			output.Info("%s", line)
+		}
+		for _, line := range outcome.ToDo {
+			output.Info("Still to do: %s", line)
+		}
+		if err != nil {
+			problems = append(problems, "MCP server: "+err.Error())
+		}
+	case len(mcpChanges) > 0:
+		for _, l := range mcpLines {
+			output.Info("Kept: %s. To remove it later, run contro1 disconnect %s --yes, or remove it yourself.", l, platform)
 		}
 	}
 	if st != nil {
-		if err := adapter.RemoveConfig(cmd.Context(), &st.Journal); err != nil {
+		if err := adapter.RemoveConfig(ctx, &st.Journal); err != nil {
 			problems = append(problems, err.Error())
 		}
 		_ = fileStates{}.Clear(platform)
@@ -426,6 +513,14 @@ func runDoctorPlatform(cmd *cobra.Command, platform string) error {
 		return &output.ExitError{Code: output.CodeGeneral, Msg: "repairable"}
 	}
 	return nil
+}
+
+// lowerFirst puts a sentence in the middle of another one.
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
 
 func orDefault(value, fallback string) string {

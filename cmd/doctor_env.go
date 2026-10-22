@@ -70,6 +70,12 @@ func (e *systemDoctorEnv) ControlReachableUnelevated(ctx context.Context) bool {
 
 func (e *systemDoctorEnv) IsElevated() bool { return installer.IsElevated() }
 
+// ServiceVersion sets the installed service against this CLI (doctor.ServiceVersionEnv).
+func (e *systemDoctorEnv) ServiceVersion() (installer.ServiceComparison, string) {
+	c, _, _ := compareInstalledService(e.layout)
+	return c, serviceUpdateCommand()
+}
+
 func (e *systemDoctorEnv) PublicStatus() (*brokerstore.PublicStatus, error) {
 	for _, dir := range []string{e.layout.PlatformsDir, e.layout.StateDir} {
 		if st, err := brokerstore.OpenReadOnly(dir).ReadStatus(); err == nil {

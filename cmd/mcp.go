@@ -30,6 +30,9 @@ func init() {
 		if flagAPIURL != "" {
 			apiURL = flagAPIURL
 		}
+		// The same line auth login and connect print: a person sign-in made
+		// against a leftover localhost profile looked exactly like a real one.
+		printDevelopmentServerNote(os.Stderr, flagAPIURL)
 		credentials, err := mcpbridge.Login(apiURL, name, clientName, allowExecute)
 		if err != nil {
 			return err
@@ -202,7 +205,7 @@ func mcpSetupMessage(cause error, selector, client string, connections []platfor
 	if len(connections) == 0 {
 		platform := client
 		if platform == "" {
-			platform = "<claude-code|openclaw|nanoclaw>"
+			platform = "<claude-code|cursor|codex|openclaw|nanoclaw>"
 		}
 		msg := "This computer is not connected to Contro1. Run contro1 connect " + platform + " on this computer, approve it in the browser, then restart this MCP server."
 		if selector != "" {
