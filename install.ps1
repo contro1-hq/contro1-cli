@@ -51,7 +51,7 @@ try {
     if ($holding.Count -gt 0) { $running = $holding }
     Write-Host ""
     Write-Host "contro1 is running, so $target cannot be replaced." -ForegroundColor Yellow
-    Write-Host "Usually it is Claude Code's Contro1 MCP connection, or contro1 in another terminal:"
+    Write-Host "Usually it is the Contro1 MCP server that Claude Code, Codex or Cursor started, or contro1 in another terminal:"
     $lines = @{}
     try {
       Get-CimInstance Win32_Process -Filter "Name='$bin.exe'" -ErrorAction Stop |
@@ -64,7 +64,7 @@ try {
       Write-Host ("  PID {0}  {1}" -f $p.Id, $what)
     }
     Write-Host ""
-    Write-Host "Close the Claude Code windows, or stop these processes:"
+    Write-Host "Close Claude Code, Codex and Cursor, or stop these processes:"
     Write-Host ("  Get-Process $bin | Where-Object Path -eq '{0}' | Stop-Process" -f ($target -replace "'", "''"))
     Write-Host "Then run the installer again."
     # `exit` would close the window this was piped into with `| iex`; the

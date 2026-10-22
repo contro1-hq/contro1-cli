@@ -52,13 +52,13 @@ replace_failed() {
     {
       echo ""
       echo "contro1 is running, so $1 could not be replaced."
-      echo "Usually it is Claude Code's Contro1 MCP connection, or contro1 in another terminal:"
+      echo "Usually it is the Contro1 MCP server that Claude Code, Codex or Cursor started, or contro1 in another terminal:"
       for pid in $pids; do
         line=$(ps -o pid= -o args= -p "$pid" 2>/dev/null || true)
         echo "  ${line:-$pid $BIN}"
       done
       echo ""
-      echo "Close the Claude Code windows, or stop these processes: pkill -x $BIN"
+      echo "Close Claude Code, Codex and Cursor, or stop these processes: pkill -x $BIN"
       echo "Then run the installer again."
     } >&2
   fi
