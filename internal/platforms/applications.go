@@ -190,7 +190,7 @@ func (o *openClaw) RemainingSetup() []string {
 		// An agent whose tool profile excludes terminal tools answers "I cannot
 		// run commands"; show names the exact alsoAllow entry that fixes it.
 		"Check each assistant can run commands at all: openclaw exec-policy show --agent <agent id>",
-		"Start the Contro1 bridge for OpenClaw on this computer. It hands those approvals to Contro1: https://contro1.com/docs/openclaw-human-approval",
+		"Start the Contro1 bridge for OpenClaw on this computer. It hands those approvals to Contro1: https://contro1.com/docs/connect-an-agent/personal-agents#openclaw",
 		"Check it: contro1 doctor openclaw",
 		`Then ask your assistant to run "touch ~/contro1-test.txt". Contro1 asks you to approve it first.`,
 	}
@@ -209,7 +209,7 @@ func (c *claudeCode) RemainingSetup() []string {
 		return nil
 	}
 	return []string{
-		"Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/claude-code-permission-approvals",
+		"Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/connect-an-agent/claude-code#claude-code",
 		"Check it: contro1 doctor claude-code",
 	}
 }

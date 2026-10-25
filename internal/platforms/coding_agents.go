@@ -169,7 +169,7 @@ func (c *cursor) ApplyApplications(ctx context.Context, conn LocalConnection, j 
 type codex struct{ localCodingAgent }
 
 func (c *codex) SafeTest() string {
-	return "Try it: start a new Codex session and ask it to call the Contro1 whoami tool. It answers with this agent's name. To stop deploy commands for approval as well, add the contro1 hooks codex hook: https://contro1.com/docs/codex-human-approval"
+	return "Try it: start a new Codex session and ask it to call the Contro1 whoami tool. It answers with this agent's name. To stop deploy commands for approval as well, add the contro1 hooks codex hook: https://contro1.com/docs/connect-an-agent/codex#codex-hooks"
 }
 
 func (c *codex) ApplicationChanges(conn LocalConnection) []Change {
