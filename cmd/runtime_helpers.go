@@ -26,11 +26,13 @@ func envToken() (string, string, error) {
 }
 
 // runtimeEnvToken returns a token supplied through the runtime environment, and
-// which variable it came from. Order: CONTRO1_AGENT_TOKEN_FILE,
+// which variable it came from. Order: CONTRO1_AGENT_TOKEN_FILE, CONTRO1_API_KEY,
 // CONTRO1_AGENT_TOKEN, CONTRO1_TOKEN. It returns an empty token (and no error)
 // when none is set.
 //
-// The two AGENT variables promise an Agent Credential by name, so a browser-issued
+// CONTRO1_API_KEY is the name the documentation and SDK examples use, so an
+// agent set up from them works here without a second variable. It and the two
+// AGENT variables promise an Agent Credential by name, so a browser-issued
 // cco_cli_ token in them is refused outright rather than silently used.
 // CONTRO1_TOKEN keeps its original meaning: any token, for agent/CI use.
 func runtimeEnvToken() (string, string, error) {
@@ -48,6 +50,12 @@ func runtimeEnvToken() (string, string, error) {
 		}
 		return token, "CONTRO1_AGENT_TOKEN_FILE", nil
 	}
+	if token := strings.TrimSpace(os.Getenv("CONTRO1_API_KEY")); token != "" {
+		if strings.HasPrefix(token, browserCliTokenPrefix) {
+			return "", "", output.Errf(output.CodeUnsafeBlocked, "CONTRO1_API_KEY holds a browser-issued CLI token; it must hold an Agent Credential")
+		}
+		return token, "CONTRO1_API_KEY", nil
+	}
 	if token := strings.TrimSpace(os.Getenv("CONTRO1_AGENT_TOKEN")); token != "" {
 		if strings.HasPrefix(token, browserCliTokenPrefix) {
 			return "", "", output.Errf(output.CodeUnsafeBlocked, "CONTRO1_AGENT_TOKEN holds a browser-issued CLI token; it must hold an Agent Credential")
@@ -63,7 +71,7 @@ func runtimeEnvToken() (string, string, error) {
 // anyEnvTokenConfigured reports whether any env token source is set, valid or
 // not. It is used by operator-mode guards.
 func anyEnvTokenConfigured() bool {
-	for _, name := range []string{"CONTRO1_AGENT_TOKEN_FILE", "CONTRO1_AGENT_TOKEN", "CONTRO1_TOKEN"} {
+	for _, name := range []string{"CONTRO1_AGENT_TOKEN_FILE", "CONTRO1_API_KEY", "CONTRO1_AGENT_TOKEN", "CONTRO1_TOKEN"} {
 		if strings.TrimSpace(os.Getenv(name)) != "" {
 			return true
 		}

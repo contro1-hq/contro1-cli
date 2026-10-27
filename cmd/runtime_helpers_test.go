@@ -13,6 +13,7 @@ import (
 func clearTokenEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("CONTRO1_AGENT_TOKEN_FILE", "")
+	t.Setenv("CONTRO1_API_KEY", "")
 	t.Setenv("CONTRO1_AGENT_TOKEN", "")
 	t.Setenv("CONTRO1_TOKEN", "")
 }

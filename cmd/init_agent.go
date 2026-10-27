@@ -12,6 +12,7 @@ var (
 	initAgentName      string
 	initAgentFramework string
 	initAgentParent    string
+	initAgentNoBrowser bool
 )
 
 func init() {
@@ -23,6 +24,7 @@ func init() {
 	}
 	cmd.Flags().StringVar(&initAgentName, "name", "", "agent name (required)")
 	cmd.Flags().StringVar(&initAgentFramework, "framework", "coding-agent", "agent framework/type")
+	cmd.Flags().BoolVar(&initAgentNoBrowser, "no-browser", false, "print the setup link instead of opening it")
 	cmd.Flags().StringVar(&initAgentParent, "parent", "", "agent id this one belongs to, when it is a separate program another agent starts (it gets its own permissions)")
 	_ = cmd.MarkFlagRequired("name")
 	rootCmd.AddCommand(cmd)
@@ -73,5 +75,13 @@ func runInitAgent(_ *cobra.Command, _ []string) error {
 
 	infof("Connected and set %s as the default agent for profile %s", agentID, profileName)
 	result := map[string]any{"connected": true, "profile": profileName, "agent": agent, "default_agent_id": agentID}
-	return output.Render(outFormat(pr), result, agentDetailTable(agent))
+	if setupURL := str(resp["setup_url"]); setupURL != "" {
+		result["setup_url"] = setupURL
+	}
+	if err := output.Render(outFormat(pr), result, agentDetailTable(agent)); err != nil {
+		return err
+	}
+	printRegisterNextSteps(str(resp["setup_url"]), asMap(resp["next_steps"]))
+	openSetupLink(str(resp["setup_url"]), str(resp["created"]) == "true", initAgentNoBrowser)
+	return nil
 }

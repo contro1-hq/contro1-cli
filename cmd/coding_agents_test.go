@@ -27,7 +27,7 @@ func publishCodexMapping(t *testing.T) string {
 
 func clearRuntimeEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"CONTRO1_AGENT_TOKEN_FILE", "CONTRO1_AGENT_TOKEN", "CONTRO1_TOKEN", "CONTRO1_BROKER_ENDPOINT"} {
+	for _, k := range []string{"CONTRO1_AGENT_TOKEN_FILE", "CONTRO1_API_KEY", "CONTRO1_AGENT_TOKEN", "CONTRO1_TOKEN", "CONTRO1_BROKER_ENDPOINT"} {
 		t.Setenv(k, "")
 	}
 	old := flagBrokerEndpoint

@@ -78,8 +78,11 @@ try {
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   if ($userPath -notlike "*$dir*") {
     [Environment]::SetEnvironmentVariable("Path", "$userPath;$dir", "User")
-    Write-Host "Added $dir to your user PATH (restart the terminal to pick it up)."
+    Write-Host "Added $dir to your user PATH."
   }
+  # This window too: the next documented step (contro1 private-connector
+  # install) runs right here, and `| iex` shares this session's environment.
+  if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$env:Path;$dir" }
   Write-Host "Installed contro1 to $dir\$bin.exe"
   $global:LASTEXITCODE = 0
 } finally {

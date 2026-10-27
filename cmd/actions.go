@@ -43,7 +43,7 @@ and what is waiting on a person.
 A browser-issued CLI token can read invocations but never invoke or cancel one:
 a token minted by clicking a link in a browser should not be able to send mail
 from a customer mailbox. ` + "`invoke`" + ` and ` + "`cancel`" + ` are runtime-only. They read an
-Agent Credential from CONTRO1_AGENT_TOKEN_FILE, CONTRO1_AGENT_TOKEN or
+Agent Credential from CONTRO1_AGENT_TOKEN_FILE, CONTRO1_API_KEY, CONTRO1_AGENT_TOKEN or
 CONTRO1_TOKEN, never from the keychain, and refuse a cco_cli_ token before any
 request is sent. An administrator grants that credential on purpose.`,
 	}

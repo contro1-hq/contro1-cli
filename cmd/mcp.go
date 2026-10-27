@@ -21,7 +21,14 @@ func init() {
 	}
 	var clientName string
 	var allowExecute bool
-	login := &cobra.Command{Use: "login", Short: "Authorize the local MCP adapter; approve on any device with a code", RunE: func(_ *cobra.Command, _ []string) error {
+	login := &cobra.Command{Use: "login", Short: "Authorize the local MCP adapter; approve on any device with a code",
+		// Said up front because a coding agent ran this under the name of the
+		// agent it was building, and the organization found a second agent,
+		// signed in as a person, beside the real one.
+		Long: "Signs a tool in to the Contro1 MCP as YOU: it acts with your access and is recorded as yours. " +
+			"It is not how an agent you are building connects. That agent uses its own Agent Credential; " +
+			"contro1 agents register prints where a person creates it.",
+		RunE: func(_ *cobra.Command, _ []string) error {
 		_, profile, name, err := loadCtx()
 		if err != nil {
 			return err
@@ -41,7 +48,7 @@ func init() {
 		infof("See or disconnect it anytime in Contro1: Settings > Connected apps.")
 		return nil
 	}}
-	login.Flags().StringVar(&clientName, "client-name", "contro1 CLI stdio adapter", "name shown on the OAuth consent screen")
+	login.Flags().StringVar(&clientName, "client-name", "contro1 CLI stdio adapter", "name of the tool signing in (your editor or MCP client), shown on the consent screen. Not the name of an agent you are building")
 	login.Flags().BoolVar(&allowExecute, "execute", false, "also ask to run Actions ("+mcpbridge.ExecuteScope+"); they run with your own authority and are recorded as yours")
 	status := &cobra.Command{Use: "status", Short: "Show local MCP OAuth status", RunE: func(_ *cobra.Command, _ []string) error {
 		_, _, name, err := loadCtx()

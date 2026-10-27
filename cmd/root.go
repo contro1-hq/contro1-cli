@@ -174,7 +174,7 @@ func newClient() (*client.Client, *config.Profile, error) {
 	// shell belongs to a runtime bridge. Refuse operator mode rather than letting
 	// an automation environment masquerade as an interactive operator session.
 	if pr.AccessProfile == "operator" && anyEnvTokenConfigured() {
-		return nil, nil, output.Errf(output.CodeAuth, "operator mode requires an interactive browser-issued profile; CONTRO1_TOKEN, CONTRO1_AGENT_TOKEN and CONTRO1_AGENT_TOKEN_FILE are only supported for agent/CI use")
+		return nil, nil, output.Errf(output.CodeAuth, "operator mode requires an interactive browser-issued profile; CONTRO1_TOKEN, CONTRO1_API_KEY, CONTRO1_AGENT_TOKEN and CONTRO1_AGENT_TOKEN_FILE are only supported for agent/CI use")
 	}
 	apiURL := pr.APIURL
 	if flagAPIURL != "" {

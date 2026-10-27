@@ -83,7 +83,7 @@ func init() {
 		GroupID: groupAgent,
 	}
 	requestsCmd.PersistentFlags().BoolVar(&reqRuntime, "runtime", false,
-		"use the host bridge Agent Credential (CONTRO1_AGENT_TOKEN_FILE, CONTRO1_AGENT_TOKEN, CONTRO1_TOKEN); never the keychain")
+		"use the host bridge Agent Credential (CONTRO1_AGENT_TOKEN_FILE, CONTRO1_API_KEY, CONTRO1_AGENT_TOKEN, CONTRO1_TOKEN); never the keychain")
 
 	createCmd := &cobra.Command{
 		Use:   "create",

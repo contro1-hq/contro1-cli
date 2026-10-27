@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/contro1-hq/contro1-cli/internal/output"
+	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 )
 
@@ -10,6 +13,7 @@ var (
 	agentFramework   string
 	agentDescription string
 	agentOwner       string
+	agentNoBrowser   bool
 )
 
 func init() {
@@ -30,6 +34,7 @@ func init() {
 	registerCmd.Flags().StringVar(&agentFramework, "framework", "", "alias for --type")
 	registerCmd.Flags().StringVar(&agentDescription, "description", "", "description")
 	registerCmd.Flags().StringVar(&agentOwner, "owner", "", "owner label")
+	registerCmd.Flags().BoolVar(&agentNoBrowser, "no-browser", false, "print the setup link instead of opening it")
 	_ = registerCmd.MarkFlagRequired("name")
 
 	listCmd := &cobra.Command{Use: "list", Short: "List agents", RunE: runAgentList}
@@ -83,7 +88,61 @@ func runAgentRegister(_ *cobra.Command, _ []string) error {
 	} else {
 		infof("Agent already existed: %s", str(agent["agent_id"]))
 	}
-	return output.Render(outFormat(pr), agent, agentDetailTable(agent))
+	if err := output.Render(outFormat(pr), agent, agentDetailTable(agent)); err != nil {
+		return err
+	}
+	printRegisterNextSteps(str(resp["setup_url"]), asMap(resp["next_steps"]))
+	openSetupLink(str(resp["setup_url"]), str(resp["created"]) == "true", agentNoBrowser)
+	return nil
+}
+
+// printRegisterNextSteps says what the registered agent needs next, on
+// stderr so --output json stays one document. Without it the id was all a
+// coding agent got back, and it signed in as its person to find the rest,
+// which made a second identity named after this agent.
+// openSetupLink opens a new agent's setup page, where its person names the
+// owner and chooses what it may do. Printed alone, the link was easy to leave
+// for later, and the agent's first approval request then had nobody to go to.
+// Opened even when a coding agent runs the command: the person is at this
+// computer. Not with --no-browser, JSON output or in CI.
+func openSetupLink(setupURL string, created bool, noBrowser bool) {
+	if setupURL == "" || !created || noBrowser || flagFormat == "json" || os.Getenv("CI") != "" {
+		return
+	}
+	if err := browser.OpenURL(setupURL); err == nil {
+		infof("Opened the setup page in your browser.")
+	}
+}
+
+func printRegisterNextSteps(setupURL string, next map[string]any) {
+	// The setup link first: until a person finishes it the agent has no owner
+	// and runs nothing, and it is the one thing to hand them.
+	if setupURL != "" {
+		infof("Setup: give your person this link. They confirm what the agent is for, its owner and what it may do:")
+		infof("  %s", setupURL)
+	}
+	steps := asSlice(next["steps"])
+	if len(steps) == 0 {
+		return
+	}
+	infof("Next:")
+	for i, step := range steps {
+		infof("  %d. %s", i+1, str(step))
+	}
+	if note := str(next["not_this"]); note != "" {
+		infof("  %s", note)
+	}
+	if runtime := asMap(next["runtime"]); len(runtime) > 0 {
+		if mcp := asMap(runtime["mcp"]); len(mcp) > 0 {
+			infof("  MCP (whoami, its Actions, skills, approvals): %s with %s", str(mcp["url"]), str(mcp["header"]))
+		}
+		if traces := str(runtime["traces"]); traces != "" {
+			infof("  Traces (OTLP): %s", traces)
+		}
+		infof("  Actions: %s", str(runtime["actions"]))
+		infof("  Approvals: %s", str(runtime["approvals"]))
+		infof("  Activity: %s", str(runtime["activity"]))
+	}
 }
 
 func runAgentList(_ *cobra.Command, _ []string) error {

@@ -1,10 +1,8 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Safe demo payload: this script performs no network or deployment operation.
-# Replace it with an organization-owned deployment entry point only after the
-# approval path and credential boundary have been tested.
-printf 'SIMULATED DEPLOY\n'
+# Safe demo: prints the reviewed deployment identity and performs no network call.
+printf 'Simulated production deploy\n'
 printf 'target=%s\n' "${DEPLOY_TARGET:-billing-api}"
 printf 'environment=%s\n' "${DEPLOY_ENVIRONMENT:-production}"
-printf 'commit=%s\n' "${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || printf unknown)}"
+printf 'commit=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf unknown)"

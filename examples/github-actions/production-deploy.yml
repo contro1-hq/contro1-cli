@@ -20,7 +20,7 @@ jobs:
 
       - name: Install pinned Contro1 CLI
         env:
-          CONTRO1_VERSION: v0.1.4 # Pin the release approved by your organization.
+          CONTRO1_VERSION: v0.1.4
           CONTRO1_INSTALL_DIR: ${{ runner.temp }}/contro1-bin
         run: |
           curl -fsSL https://raw.githubusercontent.com/contro1-hq/contro1-cli/382c270ed50a5277e298c8d6bdeec35d017a79e8/install.sh | sh
@@ -52,12 +52,7 @@ jobs:
               request_type: "approval",
               external_request_id: ("github-actions:" + $repository + ":" + $run_id + ":" + $run_attempt),
               correlation_id: ("github-actions:" + $repository + ":" + $run_id),
-              source: {
-                integration: "github-actions",
-                framework: "ci",
-                workflow_id: $workflow,
-                run_id: $run_id
-              },
+              source: { integration: "github-actions", framework: "ci", workflow_id: $workflow, run_id: $run_id },
               actor: { user_id: $actor, agent_name: "github-actions" },
               routing: { required_role: "cto", priority: "urgent", sla_minutes: 15 },
               context: {
@@ -65,40 +60,16 @@ jobs:
                 environment: "production",
                 resource: $service,
                 summary: "Release the reviewed commit to production.",
-                machine_observed: {
-                  repository: $repository,
-                  commit_sha: $sha,
-                  workflow: $workflow,
-                  run_id: $run_id,
-                  run_attempt: $run_attempt,
-                  service: $service,
-                  environment: "production"
-                }
+                machine_observed: { repository: $repository, commit_sha: $sha, workflow: $workflow, run_id: $run_id, run_attempt: $run_attempt, service: $service, environment: "production" }
               },
               continuation: { mode: "decision" },
               risk_level: "critical",
               policy_trigger: "Production deploys require CTO authorization",
-              policy_context: {
-                source: "github-actions",
-                policy_name: "production-deploy-approval",
-                rule_id: "deploy.requires-cto",
-                rule_reason: "Production deploys require CTO authorization",
-                enforcement: "credential-boundary"
-              },
-              approval_policy: {
-                mode: "single",
-                required_approvals: 1,
-                required_roles: ["cto"],
-                separation_of_duties: true,
-                fail_closed_on_timeout: true
-              }
+              policy_context: { source: "github-actions", policy_name: "production-deploy-approval", rule_id: "deploy.requires-cto", rule_reason: "Production deploys require CTO authorization", enforcement: "credential-boundary" },
+              approval_policy: { mode: "single", required_approvals: 1, required_roles: ["cto"], separation_of_duties: true, fail_closed_on_timeout: true }
             }' > "$RUNNER_TEMP/contro1-deploy-request.json"
 
-          contro1 requests create \
-            --file "$RUNNER_TEMP/contro1-deploy-request.json" \
-            --wait \
-            --format json > "$RUNNER_TEMP/contro1-decision.json"
-
+          contro1 requests create --file "$RUNNER_TEMP/contro1-deploy-request.json" --wait --format json > "$RUNNER_TEMP/contro1-decision.json"
           request_id=$(jq -r '.id // .request_id // ._id' "$RUNNER_TEMP/contro1-decision.json")
           test -n "$request_id" && test "$request_id" != "null"
           echo "request_id=$request_id" >> "$GITHUB_OUTPUT"
@@ -115,8 +86,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
 
-      # Obtain short-lived cloud credentials here with GitHub OIDC. Do not make
-      # production credentials available to the approval job or developer agent.
+      # Obtain short-lived cloud credentials here with GitHub OIDC. Production
+      # credentials must not be available to the approval job or developer agent.
       - name: Deploy the approved commit
         env:
           CONTRO1_REQUEST_ID: ${{ needs.approval.outputs.request_id }}

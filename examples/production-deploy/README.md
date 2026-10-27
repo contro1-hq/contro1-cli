@@ -1,11 +1,11 @@
-# Production deploy approval demo
+# Safe production deploy demo
 
-This demo shows the complete developer experience without touching a real
-cluster or cloud account.
+This demo exercises the same canonical approval and evidence path as a real
+deployment without changing infrastructure or making a network call.
 
 ```bash
 contro1 auth login --mode agent
-contro1 init --name "Deploy demo agent"
+contro1 init --name "deployment-demo"
 
 contro1 run \
   --role cto \
@@ -13,20 +13,15 @@ contro1 run \
   --environment production \
   --target billing-api \
   --reason "Production deploys require CTO authorization" \
-  --sla-minutes 10 \
-  --timeout 15m \
   -- ./examples/production-deploy/simulate-deploy.sh
 ```
 
-Expected flow:
+The reviewer receives the redacted command, hash of the original argv, current commit, workspace-state
+hash, target, environment, risk, policy trigger, and source. Approval executes
+the original argv bound to that hash only if the repository state still matches. Rejection,
+timeout, API failure, or a changed workspace blocks execution.
 
-1. The command remains blocked and a canonical request appears in Contro1.
-2. The request shows the redacted command, hash of the original argv, repo commit, workspace
-   state, target, risk, policy trigger, and required reviewer role.
-3. Reject or let it time out: the script never runs.
-4. Approve: the CLI rechecks the repo state and runs the original argv bound to that hash.
-5. `contro1 evidence for-request <id>` shows the decision and client-reported
-   execution outcome.
-
-This is a convenience gate. For an organization control, put production
-credentials in a separate CI/deployment job and use the GitHub Actions template.
+This local wrapper is a convenience gate. For production enforcement, run the
+approval in CI without production credentials and place deployment credentials
+only in a protected downstream job. See
+[`../github-actions/production-deploy.yml`](../github-actions/production-deploy.yml).

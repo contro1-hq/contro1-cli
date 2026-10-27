@@ -97,6 +97,18 @@ func runQueueList(_ *cobra.Command, _ []string) error {
 	return renderQueue(pr, asSlice(client.Data(resp)))
 }
 
+func runMyRequests(_ *cobra.Command, _ []string) error {
+	c, pr, err := newClient()
+	if err != nil {
+		return err
+	}
+	resp, err := c.Do("GET", "/api/centcom/v1/operator/my-requests", nil)
+	if err != nil {
+		return err
+	}
+	return renderQueue(pr, asSlice(client.Data(resp)))
+}
+
 func runQueueClaim(_ *cobra.Command, args []string) error {
 	c, pr, err := newClient()
 	if err != nil {
@@ -220,16 +232,4 @@ func runQueueWatch(_ *cobra.Command, _ []string) error {
 		first = false
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
-}
-
-func runMyRequests(_ *cobra.Command, _ []string) error {
-	c, pr, err := newClient()
-	if err != nil {
-		return err
-	}
-	resp, err := c.Do("GET", "/api/centcom/v1/operator/my-requests", nil)
-	if err != nil {
-		return err
-	}
-	return renderQueue(pr, asSlice(client.Data(resp)))
 }
