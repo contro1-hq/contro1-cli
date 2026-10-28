@@ -1,6 +1,7 @@
 package privateconnector
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,6 +83,9 @@ func DecodeSetup(reader io.Reader) (SetupInput, error) {
 	if len(raw) > 256<<10 {
 		return input, errors.New("connector setup exceeded limit")
 	}
+	// Windows PowerShell 5.1 starts piped text with a UTF-8 BOM, and Notepad
+	// can save one after the key is typed in: neither is part of the JSON.
+	raw = bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf"))
 	// The file from Contro1 marks what only this computer may fill in.
 	if strings.Contains(string(raw), "REPLACE:") {
 		return input, errors.New("the setup file still has REPLACE values: fill in the local API address, its IP and its credential first")

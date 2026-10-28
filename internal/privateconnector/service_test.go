@@ -17,6 +17,14 @@ func testSetup() SetupInput {
 	}, EnrollmentCode: strings.Repeat("B", 43)}
 }
 
+func TestDecodeSetupIgnoresLeadingBOM(t *testing.T) {
+	raw, _ := json.Marshal(testSetup())
+	got, err := DecodeSetup(strings.NewReader("\xef\xbb\xbf" + string(raw)))
+	if err != nil || got.InstallationID != testSetup().InstallationID {
+		t.Fatalf("setup piped by Windows PowerShell 5.1: %+v, %v", got, err)
+	}
+}
+
 func TestDecodeSetupAndProvisionSeparateSecrets(t *testing.T) {
 	input := testSetup()
 	raw, _ := json.Marshal(input)
