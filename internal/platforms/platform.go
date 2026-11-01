@@ -94,6 +94,11 @@ type Adapter interface {
 	// only one of them is visible from here. A platform that needs its own
 	// channel installed is connected long before it is governed.
 	RemainingSetup() []string
+	// OptionalSetup lists what a person may add by hand that connecting works
+	// without. It is said after a success, never as something missing: a
+	// connection that already works must not read as unfinished. Empty when
+	// there is nothing to offer, or it is already there.
+	OptionalSetup() []string
 	ApplicationChanges(conn LocalConnection) []Change
 	ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error
 	// SafeTest is the suggestion printed once connected.

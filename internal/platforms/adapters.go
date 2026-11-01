@@ -399,8 +399,14 @@ func (c *claudeCode) ApplyRoles(context.Context, *runtimeproto.MappingFile, *Jou
 func (c *claudeCode) AllowedPrincipal(string) (string, error) {
 	return currentPrincipal(c.opts.Principal)
 }
+
+// SafeTest asks for what works on every connected computer; the deploy test
+// needs the optional approval hook, so it is suggested only where that is in.
 func (c *claudeCode) SafeTest() string {
-	return "Try it: ask Claude Code to run a command that needs approval."
+	if c.approvalHookInstalled() {
+		return "Try it: ask Claude Code to run a command that needs approval."
+	}
+	return "Try it: open a new Claude Code session and ask it to call the Contro1 whoami tool. It answers with this agent's name."
 }
 
 func firstNonEmpty(values ...string) string {

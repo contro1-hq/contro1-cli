@@ -162,6 +162,8 @@ from a release of a different project is a tool nobody can reason about when
 something later breaks. Naming the steps at the moment they become relevant is
 worth more than doing them invisibly.
 */
+func (n *nanoClaw) OptionalSetup() []string { return nil }
+
 func (n *nanoClaw) RemainingSetup() []string {
 	return []string{
 		"Install the Contro1 channel into NanoClaw: copy contro1.ts and contro1-governance.ts into src/channels/ and add the import. See skills/add-contro1 in the connector.",
@@ -181,6 +183,8 @@ exec tool may be off (the assistant then says it cannot run commands at all),
 or on without asking. Saying "connected, try it" here sent people to a test
 that could not work.
 */
+func (o *openClaw) OptionalSetup() []string { return nil }
+
 func (o *openClaw) RemainingSetup() []string {
 	return []string{
 		// The preset sets security allowlist, ask on-miss and askFallback deny
@@ -197,25 +201,39 @@ func (o *openClaw) RemainingSetup() []string {
 }
 
 /*
-Claude Code needs one thing connecting does not install: the approval hook,
-which nothing on the computer wires up. The end of `contro1 connect claude-code`
-used to say "Try it" without it. The MCP server used to be the second item here;
-connect installs it now, as its last step, so it is no longer the person's.
-Named only while it is missing, so a computer that has the hook hears "Try it"
-and nothing else.
+NOTHING IS LEFT ONCE CONNECT HAS RUN. connect installs the MCP server, and
+company-app actions go through Contro1 from then on, with an approval first
+where the organization's policy asks for one.
+
+The approval hook used to be named here, so a working connection ended with
+"not working end to end yet". It covers something else: commands Claude Code
+runs in the terminal, which never reach Contro1 without it. It is offered as
+optional instead, with the activity hook, each only while it is missing.
 */
-func (c *claudeCode) RemainingSetup() []string {
-	if c.hookInstalled() {
-		return nil
+func (c *claudeCode) RemainingSetup() []string { return nil }
+
+func (c *claudeCode) OptionalSetup() []string {
+	settings := c.settings()
+	var offers []string
+	if !strings.Contains(settings, "centcom-claude-code") {
+		offers = append(offers, "Optional: approvals for terminal commands (deploy-like commands by default): npm install -g @contro1/claude-code, then add its hook to ~/.claude/settings.json: https://contro1.com/docs/connect-an-agent/claude-code#terminal-approvals")
 	}
-	return []string{
-		"Approvals for risky commands: npm install -g @contro1/claude-code, then add its PreToolUse hook to ~/.claude/settings.json: https://contro1.com/docs/connect-an-agent/claude-code#claude-code",
-		"Check it: contro1 doctor claude-code",
+	if !strings.Contains(settings, "contro1 activity hook") {
+		offers = append(offers, "Optional: a trace of every Claude Code tool call: add contro1 activity hook to ~/.claude/settings.json: https://contro1.com/docs/connect-an-agent/claude-code#tool-call-traces")
 	}
+	return offers
 }
 
-// hookInstalled reads the user's Claude Code settings for the Contro1 hook.
-func (c *claudeCode) hookInstalled() bool {
+// approvalHookInstalled reads the user's Claude Code settings for the Contro1 approval hook.
+func (c *claudeCode) approvalHookInstalled() bool {
+	return strings.Contains(c.settings(), "centcom-claude-code")
+}
+
+// settings is the user's Claude Code settings file, or empty when there is none.
+func (c *claudeCode) settings() string {
 	raw, err := os.ReadFile(filepath.Join(c.opts.Home, ".claude", "settings.json"))
-	return err == nil && strings.Contains(string(raw), "centcom-claude-code")
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }

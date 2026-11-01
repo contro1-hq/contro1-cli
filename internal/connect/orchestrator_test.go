@@ -146,10 +146,12 @@ type fakeAdapter struct {
 	applied   int
 	reachErr  bool
 	remaining []string
+	optional  []string
 }
 
 func (a *fakeAdapter) Name() string             { return "openclaw" }
 func (a *fakeAdapter) RemainingSetup() []string { return a.remaining }
+func (a *fakeAdapter) OptionalSetup() []string  { return a.optional }
 func (a *fakeAdapter) Reach(context.Context, string) (runtimeproto.AgentReach, error) {
 	if a.reachErr {
 		return runtimeproto.AgentReach{}, errors.New("cannot read reach")
@@ -481,6 +483,26 @@ func TestConnectSaysWhatItDidNotFinish(t *testing.T) {
 	ns2 := o2.Run(context.Background(), opts)
 	if strings.Contains(ns2.Message, "will not reach") || len(ns2.Checks) != 0 {
 		t.Fatalf("a finished platform must not invent work: %q %+v", ns2.Message, ns2.Checks)
+	}
+}
+
+// Optional is said after a success and never as unfinished: no "end to end",
+// nothing waiting, no trip to doctor.
+func TestConnectOffersOptionalStepsWithoutCallingItUnfinished(t *testing.T) {
+	o, _, _, _, adapter := setup(t)
+	adapter.optional = []string{"Optional: approvals for terminal commands."}
+	opts := base()
+	opts.Yes = true
+
+	ns := o.Run(context.Background(), opts)
+	if ns.State != runtimeproto.StateConnected || strings.Contains(ns.Message, "end to end") || !strings.Contains(ns.Message, "Try it.") {
+		t.Fatalf("a working connection reads as finished: %+v", ns)
+	}
+	if len(ns.Checks) != 1 || ns.Checks[0].Status != runtimeproto.CheckNotApplicable || ns.Checks[0].Label != "Optional" {
+		t.Fatalf("the offer is listed as optional, not waiting: %+v", ns.Checks)
+	}
+	if ns.NextCommand != "" {
+		t.Fatalf("nothing to fix, so no next command: %q", ns.NextCommand)
 	}
 }
 

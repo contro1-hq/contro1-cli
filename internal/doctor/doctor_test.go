@@ -503,7 +503,7 @@ func TestMcpServerChecksForAPlatformConnectInstallsOn(t *testing.T) {
 	if c, _ := findCheck(r, "mcp_server:group-a"); c.Status != runtimeproto.CheckOK {
 		t.Fatalf("an entry pinned to this agent passes: %+v", c)
 	}
-	if c, _ := findCheck(r, "mcp_live:group-a"); c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "12 actions available") {
+	if c, _ := findCheck(r, "mcp_live:group-a"); c.Status != runtimeproto.CheckOK || !strings.Contains(c.Message, "12 Contro1 tools") {
 		t.Fatalf("the live call is reported with what it found: %+v", c)
 	}
 	if _, ok := findCheck(r, "applications:group-a"); ok {

@@ -90,21 +90,34 @@ func TestAWrongFieldNameFailsLoudlyRatherThanSilently(t *testing.T) {
 // apps enable said "Try it" on a computer without the approval hook, so the
 // try failed. With anything still to do it lists that instead, as connect does.
 func TestAppsEnableNamesWhatIsLeftInsteadOfTryIt(t *testing.T) {
-	try := "Try it: ask Claude Code to run a command that needs approval."
-	if got := appsEnableClosing("claude-code", nil, nil, try); len(got) != 1 || got[0] != "Done. "+try {
+	try := "Try it: ask Claude Code to call the Contro1 whoami tool."
+	if got := appsEnableClosing("claude-code", nil, nil, nil, try); len(got) != 1 || got[0] != "Done. "+try {
 		t.Fatalf("nothing left: the try line: %v", got)
 	}
-	hook := "Install the Contro1 approval hook: contro1 hooks install claude-code"
-	got := strings.Join(appsEnableClosing("claude-code", []string{hook}, nil, try), "\n")
+	step := "Install the Contro1 channel into NanoClaw."
+	got := strings.Join(appsEnableClosing("nanoclaw", []string{step}, nil, nil, try), "\n")
 	if strings.Contains(got, "Try it") || strings.Contains(got, "Done.") {
 		t.Fatalf("with a step left there is no try line: %q", got)
 	}
-	if !strings.Contains(got, hook) || !strings.Contains(got, "not working end to end yet") || !strings.Contains(got, "contro1 doctor claude-code") {
+	if !strings.Contains(got, step) || !strings.Contains(got, "not working end to end yet") || !strings.Contains(got, "contro1 doctor nanoclaw") {
 		t.Fatalf("the step and the check are named: %q", got)
 	}
-	got = strings.Join(appsEnableClosing("openclaw", nil, []string{"Restart the OpenClaw gateway."}, "Try it."), "\n")
+	got = strings.Join(appsEnableClosing("openclaw", nil, []string{"Restart the OpenClaw gateway."}, nil, "Try it."), "\n")
 	if strings.HasPrefix(got, "Done.") {
 		t.Fatalf("an MCP step still to do holds back \"Done\": %q", got)
+	}
+}
+
+// Something optional never makes a finished setup read as unfinished: it
+// follows "Done." and the try line.
+func TestAppsEnableOffersOptionalStepsAfterDone(t *testing.T) {
+	offer := "Optional: approvals for terminal commands: npm install -g @contro1/claude-code"
+	got := appsEnableClosing("claude-code", nil, nil, []string{offer}, "Try it.")
+	if len(got) != 2 || got[0] != "Done. Try it." || got[1] != offer {
+		t.Fatalf("done first, then the optional step: %v", got)
+	}
+	if joined := strings.Join(got, "\n"); strings.Contains(joined, "end to end") {
+		t.Fatalf("optional is not missing: %q", joined)
 	}
 }
 

@@ -139,6 +139,7 @@ connect cannot do (no cursor/codex command on this computer, a config file it
 will not edit) is said by the MCP step itself, with the exact block to paste.
 */
 func (a *localCodingAgent) RemainingSetup() []string { return nil }
+func (a *localCodingAgent) OptionalSetup() []string  { return nil }
 
 func (a *localCodingAgent) mcpConfigDir(defaultDir string) string {
 	if a.opts.ConfigDir != "" {

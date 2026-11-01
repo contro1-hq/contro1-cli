@@ -3,6 +3,8 @@ package platforms
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +105,37 @@ func TestClaudeCodeRemainingSetupNoLongerNamesTheMcpServer(t *testing.T) {
 		if strings.Contains(step, "apps enable") || strings.Contains(step, "MCP") {
 			t.Fatalf("the MCP step belongs to connect now: %q", step)
 		}
+	}
+}
+
+// The approval hook is optional: without it nothing is left, it is offered,
+// and the try line is one that works without it.
+func TestClaudeCodeHooksAreOptionalAndOfferedOnlyWhileMissing(t *testing.T) {
+	home := t.TempDir()
+	a, _ := New("claude-code", Options{Home: home, Runner: fakeRunner(nil)})
+	if left := a.RemainingSetup(); len(left) != 0 {
+		t.Fatalf("connect leaves nothing to do: %v", left)
+	}
+	offers := strings.Join(a.OptionalSetup(), "\n")
+	if !strings.Contains(offers, "@contro1/claude-code") || !strings.Contains(offers, "#terminal-approvals") || !strings.Contains(offers, "contro1 activity hook") {
+		t.Fatalf("both hooks are offered with their docs: %q", offers)
+	}
+	if strings.Contains(a.SafeTest(), "needs approval") {
+		t.Fatalf("without the hook the try line must not need it: %q", a.SafeTest())
+	}
+
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"centcom-claude-code"}]},{"matcher":"*","hooks":[{"type":"command","command":"contro1 activity hook --fail-closed"}]}]}}`
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if offers := a.OptionalSetup(); len(offers) != 0 {
+		t.Fatalf("an installed hook is not offered again: %v", offers)
+	}
+	if !strings.Contains(a.SafeTest(), "needs approval") {
+		t.Fatalf("with the hook in, the deploy test is the try line: %q", a.SafeTest())
 	}
 }
 

@@ -731,6 +731,18 @@ func (o *Orchestrator) Run(ctx context.Context, opts Options) runtimeproto.NextS
 			})
 		}
 		ns.NextCommand = "contro1 doctor " + p
+		return ns
+	}
+	// Optional after a success, and marked so: not "waiting", which reads as
+	// something missing, and not a reason to send anybody to doctor.
+	for i, offer := range o.Adapter.OptionalSetup() {
+		ns.Checks = append(ns.Checks, runtimeproto.Check{
+			ID:      fmt.Sprintf("optional_%d", i+1),
+			Label:   "Optional",
+			Status:  runtimeproto.CheckNotApplicable,
+			Actor:   "you",
+			Message: offer,
+		})
 	}
 	return ns
 }
@@ -770,16 +782,16 @@ func (o *Orchestrator) runMcp(ctx context.Context, opts Options, mapping *runtim
 		return "", outcome.ToDo, failed
 	}
 	if len(mapping.Entries) == 1 {
-		summary = fmt.Sprintf(" MCP connected: %d actions available.", counts[mapping.Entries[0].PlatformSubject])
+		summary = fmt.Sprintf(" MCP connected: %d Contro1 tools.", counts[mapping.Entries[0].PlatformSubject])
 		o.Prompt.Progress(strings.TrimSpace(summary))
 	} else {
 		var parts []string
 		for _, e := range mapping.Entries {
-			line := fmt.Sprintf("MCP connected for %s: %d actions available.", e.PlatformSubject, counts[e.PlatformSubject])
+			line := fmt.Sprintf("MCP connected for %s: %d Contro1 tools.", e.PlatformSubject, counts[e.PlatformSubject])
 			o.Prompt.Progress(line)
 			parts = append(parts, fmt.Sprintf("%s %d", e.PlatformSubject, counts[e.PlatformSubject]))
 		}
-		summary = " MCP connected, actions available: " + strings.Join(parts, ", ") + "."
+		summary = " MCP connected, Contro1 tools: " + strings.Join(parts, ", ") + "."
 	}
 	return summary, outcome.ToDo, nil
 }

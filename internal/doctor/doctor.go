@@ -641,7 +641,7 @@ func addMcpServerChecks(ctx context.Context, r *Report, env Env, platform, name 
 		add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckRepairable, Actor: "you", Message: err.Error(), NextCommand: fmt.Sprintf("contro1 connect %s --repair", platform)})
 		return
 	}
-	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: fmt.Sprintf("MCP connected: %d actions available.", tools)})
+	add(r, runtimeproto.Check{ID: id, Label: label, Status: runtimeproto.CheckOK, Message: fmt.Sprintf("MCP connected: %d Contro1 tools.", tools)})
 }
 
 /*

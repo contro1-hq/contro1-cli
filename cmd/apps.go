@@ -106,10 +106,11 @@ was not installed, so the try failed with nothing to show why. Connect
 already names what is still missing instead of the try line; this says the
 same thing the same way. remaining is what the platform still needs by hand;
 mcpTodo was printed above as "Still to do", so it only holds back the try line.
+optional follows a finished setup only, after the try line, as connect does.
 */
-func appsEnableClosing(platform string, remaining, mcpTodo []string, safeTest string) []string {
+func appsEnableClosing(platform string, remaining, mcpTodo, optional []string, safeTest string) []string {
 	if len(remaining) == 0 && len(mcpTodo) == 0 {
-		return []string{"Done. " + safeTest}
+		return append([]string{"Done. " + safeTest}, optional...)
 	}
 	if len(remaining) == 0 {
 		return []string{"Applications are set up. Finish the step above, then: " + safeTest}
@@ -240,7 +241,7 @@ func init() {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
-			for _, line := range appsEnableClosing(platform, adapter.RemainingSetup(), mcpTodo, adapter.SafeTest()) {
+			for _, line := range appsEnableClosing(platform, adapter.RemainingSetup(), mcpTodo, adapter.OptionalSetup(), adapter.SafeTest()) {
 				prompt.Progress(line)
 			}
 			return renderApplicationsResult(conn, status, journal)
