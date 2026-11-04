@@ -41,23 +41,118 @@ var knownAgentSkillDirs = []agentSkillDirs{
 	// OpenCode, Amp and others read it, so it is reported once, as "agents".
 	{"agents", []string{".agents/skills", ".config/agents/skills"}, []string{".agents/skills"}},
 	{"copilot", []string{".copilot/skills"}, []string{".github/skills"}},
-	{"antigravity", []string{".gemini/antigravity/skills"}, nil},
+	{"antigravity", []string{".gemini/config/skills", ".gemini/antigravity/skills", ".gemini/antigravity-cli/skills"}, nil},
+	{"cline", []string{".cline/skills"}, []string{".cline/skills", ".clinerules/skills"}},
+	{"amp", []string{".config/amp/skills"}, nil},
+	{"warp", nil, []string{".warp/skills"}},
 	{"windsurf", []string{".codeium/windsurf/skills"}, []string{".windsurf/skills"}},
 	{"goose", []string{".config/goose/skills"}, []string{".goose/skills"}},
 	{"opencode", []string{".config/opencode/skills"}, []string{".opencode/skills"}},
 	{"kiro", []string{".kiro/skills"}, []string{".kiro/skills"}},
 	{"roo", []string{".roo/skills"}, []string{".roo/skills"}},
-	{"kilo", []string{".kilo/skills"}, nil},
+	{"kilo", []string{".kilo/skills"}, []string{".kilo/skills"}},
 	{"continue", []string{".continue/skills"}, []string{".continue/skills"}},
 	{"augment", []string{".augment/skills"}, []string{".augment/skills"}},
 	{"junie", []string{".junie/skills"}, []string{".junie/skills"}},
 	{"qwen", []string{".qwen/skills"}, []string{".qwen/skills"}},
-	{"factory", []string{".factory/skills"}, nil},
+	{"factory", []string{".factory/skills"}, []string{".factory/skills"}},
+	// The older name of the shared folder, which Factory and Antigravity still read.
+	{"agent", []string{".agent/skills"}, []string{".agent/skills"}},
 	{"trae", []string{".trae/skills"}, []string{".trae/skills"}},
 	{"openhands", []string{".openhands/skills"}, []string{".openhands/skills"}},
 	{"crush", []string{".config/crush/skills"}, []string{".crush/skills"}},
 	{"devin", []string{".config/devin/skills"}, []string{".devin/skills"}},
 	{"hermes", nil, []string{".hermes/skills"}}, // user folder: see hermesRoots
+}
+
+// agentBinaries: agents whose command gives them away when no folder does yet.
+// Only names unlikely to be something else: goose is also a database tool.
+var agentBinaries = map[string]string{
+	"claude-code": "claude", "codex": "codex", "cursor": "cursor", "gemini": "gemini",
+	"copilot": "copilot", "opencode": "opencode", "devin": "devin", "windsurf": "windsurf",
+	"amp": "amp", "augment": "auggie", "factory": "droid", "qwen": "qwen", "cline": "cline",
+	"crush": "crush", "warp": "warp", "zed": "zed",
+}
+
+// systemSkillRoots: folders an administrator deploys skills to. Claude Code's
+// managed settings folder, Windsurf's system folder and Codex's admin folder, each
+// from that vendor's documentation. Missing ones are skipped.
+func systemSkillRoots() []skillRoot {
+	switch runtime.GOOS {
+	case "windows":
+		return []skillRoot{
+			{`C:\Program Files\ClaudeCode\.claude\skills`, "claude-code", "user", false},
+			{`C:\ProgramData\Windsurf\skills`, "windsurf", "user", false},
+		}
+	case "darwin":
+		return []skillRoot{
+			{"/Library/Application Support/ClaudeCode/.claude/skills", "claude-code", "user", false},
+			{"/Library/Application Support/Windsurf/skills", "windsurf", "user", false},
+			{"/etc/codex/skills", "codex", "user", false},
+		}
+	}
+	return []skillRoot{
+		{"/etc/claude-code/.claude/skills", "claude-code", "user", false},
+		{"/etc/windsurf/skills", "windsurf", "user", false},
+		{"/etc/codex/skills", "codex", "user", false},
+	}
+}
+
+// detectAgents lists the coding agents on a computer, from the folder each keeps
+// in the home directory and, on the computer itself, its command on the PATH.
+//
+// A FOLDER IS NOT AN AGENT. Cursor reads ~/.claude/skills as well, so the server
+// needs to know who is here to say who can load a skill. It can be wrong in one
+// direction: a folder left by an uninstalled agent still counts, which shows too
+// many readers rather than hiding one.
+func detectAgents(home string, usePath bool) []string {
+	found := map[string]bool{}
+	for _, a := range knownAgentSkillDirs {
+		if a.client == "agents" || a.client == "agent" {
+			continue // The shared folder belongs to no agent.
+		}
+		for _, rel := range a.user {
+			if isDir(filepath.Join(home, filepath.Dir(filepath.FromSlash(rel)))) {
+				found[a.client] = true
+			}
+		}
+	}
+	for client, marker := range map[string]string{"hermes": ".hermes", "openclaw": ".openclaw"} {
+		if isDir(filepath.Join(home, marker)) {
+			found[client] = true
+		}
+	}
+	// Copilot in VS Code keeps no folder of its own in the home directory. Said
+	// apart from Copilot alone: only its Local sessions read ~/.claude/skills.
+	if matches, _ := filepath.Glob(filepath.Join(home, ".vscode", "extensions", "github.copilot*")); len(matches) > 0 {
+		found["copilot"] = true
+		found["copilot-vscode"] = true
+	}
+	if usePath {
+		for client, binary := range agentBinaries {
+			if _, err := exec.LookPath(binary); err == nil {
+				found[client] = true
+			}
+		}
+	}
+	list := make([]string, 0, len(found))
+	for client := range found {
+		list = append(list, client)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// wslAgents lists the agents in each home inside running WSL distributions, by
+// that home as a skill's path shows it. Separate from the computer's own list and
+// from one another: a Cursor on Windows does not read a home inside WSL, and an
+// agent in one distribution does not read a folder in another.
+func wslAgents(homes []string) map[string][]string {
+	found := make(map[string][]string, len(homes))
+	for _, home := range homes {
+		found[filepath.ToSlash(home)] = detectAgents(home, false)
+	}
+	return found
 }
 
 // knownAgentRoots turns the table into roots for this home and project.

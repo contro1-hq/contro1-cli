@@ -151,17 +151,39 @@ func New(platform string, opts Options) (Adapter, error) {
 		return &nanoClaw{opts: opts}, nil
 	case "claude-code":
 		return &claudeCode{opts: opts}, nil
-	case "cursor":
-		return newCursor(opts), nil
 	case "codex":
 		return newCodex(opts), nil
+	}
+	if _, ok := mcpFileAgents[platform]; ok {
+		return newFileAgent(platform, opts), nil
 	}
 	return nil, fmt.Errorf("unsupported platform %q (%s)", platform, strings.Join(Supported, ", "))
 }
 
 // Supported is every platform `contro1 connect` knows, in the order commands
 // list them.
-var Supported = []string{"openclaw", "nanoclaw", "claude-code", "cursor", "codex"}
+var Supported = []string{
+	"openclaw", "nanoclaw", "claude-code", "cursor", "codex",
+	"antigravity", "gemini", "copilot", "windsurf", "opencode", "amp", "augment", "devin", "factory", "kiro", "qwen",
+}
+
+// Label is how a platform is named to a person.
+func Label(platform string) string {
+	switch platform {
+	case "openclaw":
+		return "OpenClaw"
+	case "nanoclaw":
+		return "NanoClaw"
+	case "claude-code":
+		return "Claude Code"
+	case "codex":
+		return "Codex"
+	}
+	if spec, ok := mcpFileAgents[platform]; ok {
+		return spec.label
+	}
+	return platform
+}
 
 // currentPrincipal is the default caller identity: the person running connect,
 // who also runs the platform.

@@ -48,7 +48,9 @@ and have them security-scanned.
 Where it looks (each agent's documented folders; missing ones are skipped):
   Claude Code   ~/.claude/skills, and the plugins Claude Code lists as installed
                 (~/.claude/plugins/installed_plugins.json; a catalog is not an install)
-  Codex, Cursor, Gemini CLI, Copilot, Windsurf, Goose, OpenCode, Kiro, Roo,
+  Administrator folders: Claude Code's managed settings folder, Windsurf's system
+                folder, and /etc/codex/skills on macOS and Linux
+  Codex, Cursor, Gemini CLI, Copilot, Windsurf, Goose, OpenCode, Kiro, Roo, Cline, Amp, Warp,
   Kilo, Continue, Augment, Junie, Qwen Code, Factory Droid, Trae, OpenHands,
   Crush, Devin, Antigravity, and the shared ~/.agents/skills
   OpenClaw      ~/.openclaw/skills, each workspace's skills/ and .agents/skills,
@@ -64,8 +66,12 @@ Where it looks (each agent's documented folders; missing ones are skipped):
                 distribution
   and each agent's project folder inside the current project.
 
+A skill installed as a link (a symlink, or a junction on Windows) is read from
+where the agent finds it.
+
 What it sends: each skill's files (SKILL.md and its supporting files), with the
-home directory shown as ~. Use --metadata-only to send names and digests without
+home directory shown as ~, and which coding agents are on this computer, because
+agents read one another's folders. Use --metadata-only to send names and digests without
 any file content; the skill can then be scanned only if someone else in your
 organization already reported the identical skill. Use --dry-run to see exactly
 what would be sent.
@@ -176,11 +182,32 @@ func skillRoots(home, project string) []skillRoot {
 	}
 	roots := knownAgentRoots(home, abs)
 	roots = append(roots, claudePluginRoots(home)...)
+	roots = append(roots, systemSkillRoots()...)
 	return append(roots, detectRuntimeRoots(home, abs)...)
 }
 
+// isLink: a symlink, or a Windows junction, which Go reports as irregular.
+// Skill installers link a skill into each agent's folder from one shared copy.
+func isLink(d fs.DirEntry) bool {
+	return d.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0
+}
+
+// walkInside walks what a directory holds, also when the directory itself is a
+// link: WalkDir follows no link, not even the one it was told to start from.
+func walkInside(dir string, fn fs.WalkDirFunc) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = filepath.WalkDir(filepath.Join(dir, e.Name()), fn)
+	}
+}
+
 // findSkillDirs returns every directory under root that directly holds a
-// SKILL.md. Plugin roots are searched a few levels deep; others one level.
+// SKILL.md. Plugin roots are searched a few levels deep; others one level. A
+// link to a skill counts, at the path the agent finds it by; a link to anything
+// else is not followed, so a report never wanders out of the skills folder.
 func findSkillDirs(root skillRoot) []string {
 	var dirs []string
 	maxDepth := 2
@@ -188,7 +215,7 @@ func findSkillDirs(root skillRoot) []string {
 		maxDepth = 6
 	}
 	base := strings.Count(filepath.Clean(root.dir), string(os.PathSeparator))
-	_ = filepath.WalkDir(root.dir, func(p string, d fs.DirEntry, err error) error {
+	walkInside(root.dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -203,8 +230,16 @@ func findSkillDirs(root skillRoot) []string {
 			}
 			return nil
 		}
-		if d.Name() == "SKILL.md" && filepath.Dir(p) != filepath.Clean(root.dir) {
-			dirs = append(dirs, filepath.Dir(p))
+		if d.Name() == "SKILL.md" {
+			if filepath.Dir(p) != filepath.Clean(root.dir) {
+				dirs = append(dirs, filepath.Dir(p))
+			}
+			return nil
+		}
+		if isLink(d) {
+			if info, statErr := os.Stat(filepath.Join(p, "SKILL.md")); statErr == nil && !info.IsDir() {
+				dirs = append(dirs, p)
+			}
 		}
 		return nil
 	})
@@ -278,7 +313,7 @@ func readSkill(dir string, root skillRoot, home string) (reportSkill, error) {
 	total := len(skillMD)
 	count := 1
 	tooLarge := false
-	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+	walkInside(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -293,7 +328,7 @@ func readSkill(dir string, root skillRoot, home string) (reportSkill, error) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == "SKILL.md" || d.Type()&fs.ModeSymlink != 0 {
+		if rel == "SKILL.md" || isLink(d) {
 			return nil
 		}
 		info, infoErr := d.Info()
@@ -446,6 +481,25 @@ func runSkillsReport(_ *cobra.Command, _ []string) error {
 		tbl.Rows = append(tbl.Rows, []string{s.Client, s.LocationScope, tailOf(s.Path, 50), fmt.Sprintf("%d", s.FileCount), sent})
 	}
 
+	// Which agents are here decides who can load each skill. An agent known only
+	// from where its skills are found has no folder or command of its own to spot.
+	installed := detectAgents(home, true)
+	for _, s := range skills {
+		if (s.Client == "nanoclaw" || s.Client == "cowork") && !strings.HasPrefix(s.Path, "//wsl") && !containsString(installed, s.Client) {
+			installed = append(installed, s.Client)
+		}
+	}
+	inWSL := wslHomes()
+	shown := make([]string, 0, len(installed))
+	for _, agent := range installed {
+		if agent != "copilot-vscode" {
+			shown = append(shown, agent)
+		}
+	}
+	if len(shown) > 0 {
+		infof("Coding agents found on this computer: %s.", strings.Join(shown, ", "))
+	}
+
 	if skillsReportDryRun {
 		infof("Dry run: %d skill(s) found. Nothing was sent.", len(skills))
 		return output.Render("table", skills, tbl)
@@ -498,14 +552,19 @@ func runSkillsReport(_ *cobra.Command, _ []string) error {
 		s.SkillMD, s.Files = "", nil
 		summary = append(summary, s)
 	}
-	resp, err := c.Do("POST", "/api/centcom/v1/skills/inventory", map[string]any{
+	final := map[string]any{
 		"device": map[string]string{"id": id, "label": label}, "complete": true, "skills": summary,
 		// Whether the organization's Claude Code policy blocks local skills here.
 		"claude_code_skills_lock": claudeCodeSkillsLock(),
 		// Complete for the person's own skills and this project only, so a run
 		// in another repository does not mark this one's project skills removed.
-		"project_root": projectRoot(home),
-	})
+		"project_root":     projectRoot(home),
+		"installed_agents": installed,
+	}
+	if len(inWSL) > 0 {
+		final["wsl_agents"] = wslAgents(inWSL)
+	}
+	resp, err := c.Do("POST", "/api/centcom/v1/skills/inventory", final)
 	if err != nil {
 		return err
 	}

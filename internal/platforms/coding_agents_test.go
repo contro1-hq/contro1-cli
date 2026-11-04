@@ -63,6 +63,114 @@ func TestCursorAndCodexAreTheirOwnAgentPerComputer(t *testing.T) {
 	}
 }
 
+// Every coding agent with a JSON file connects by the same rules, in its own
+// file and shape: its own agent, the other servers kept, and gone on disconnect.
+func TestEveryFilePlatformInstallsItsOwnShapeAndRemovesIt(t *testing.T) {
+	pinHost(t)
+	cases := []struct{ platform, path, key string }{
+		{"antigravity", ".gemini/config/mcp_config.json", "mcpServers"},
+		{"gemini", ".gemini/settings.json", "mcpServers"},
+		{"copilot", ".copilot/mcp-config.json", "mcpServers"},
+		{"windsurf", ".codeium/windsurf/mcp_config.json", "mcpServers"},
+		{"opencode", ".config/opencode/opencode.json", "mcp"},
+		{"amp", ".config/amp/settings.json", "amp.mcpServers"},
+		{"augment", ".augment/settings.json", "mcpServers"},
+		{"devin", ".config/devin/mcp_config.json", "mcpServers"},
+		{"factory", ".factory/mcp.json", "mcpServers"},
+		{"kiro", ".kiro/settings/mcp.json", "mcpServers"},
+		{"qwen", ".qwen/settings.json", "mcpServers"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.platform, func(t *testing.T) {
+			home := t.TempDir()
+			adapter, err := New(tc.platform, Options{Home: home})
+			if err != nil || adapter.Name() != tc.platform {
+				t.Fatalf("New: %v", err)
+			}
+			if !strings.Contains(strings.Join(Supported, " "), tc.platform) {
+				t.Fatal("connect must list it")
+			}
+			if Label(tc.platform) == tc.platform {
+				t.Fatal("named to a person")
+			}
+			a := adapter.(*fileAgent)
+			path := filepath.Join(home, filepath.FromSlash(tc.path))
+			subject := tc.platform + "@abc"
+			if a.mcpPath() != path {
+				t.Fatalf("file: %s, want %s", a.mcpPath(), path)
+			}
+
+			// Somebody else's server and setting, under this tool's own key.
+			_ = os.MkdirAll(filepath.Dir(path), 0o700)
+			_ = os.WriteFile(path, []byte(`{"theme": "dark", "`+tc.key+`": {"other": {"command": "npx"}}}`), 0o600)
+			var j Journal
+			if _, err := a.InstallMcp(context.Background(), []string{subject}, &j); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile(path)
+			var top map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &top); err != nil {
+				t.Fatalf("still JSON: %v", err)
+			}
+			var servers map[string]json.RawMessage
+			if err := json.Unmarshal(top[tc.key], &servers); err != nil || servers["other"] == nil || servers["contro1"] == nil {
+				t.Fatalf("under %s, with the other server kept: %s", tc.key, raw)
+			}
+			if string(top["theme"]) != `"dark"` {
+				t.Fatalf("other keys are kept: %s", raw)
+			}
+			listed, err := a.McpServers(context.Background())
+			if err != nil || len(listed) != 2 || !listed[1].ServesAgent(subject) {
+				t.Fatalf("read back as serving this agent: %+v %v", listed, err)
+			}
+			if again := a.McpChanges(context.Background(), []string{subject}); len(again) != 0 {
+				t.Fatalf("a second run changes nothing: %+v", again)
+			}
+
+			if _, err := a.RemoveMcp(context.Background(), []string{subject}, &j); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ = os.ReadFile(path)
+			if strings.Contains(string(raw), `"contro1"`) || !strings.Contains(string(raw), `"other"`) {
+				t.Fatalf("only ours goes: %s", raw)
+			}
+		})
+	}
+
+	// Each vendor's documented shape, where it is not the plain one.
+	home := t.TempDir()
+	copilot, _ := New("copilot", Options{Home: home})
+	if !strings.Contains(copilot.(*fileAgent).block("copilot@abc"), `"type":"local"`) || !strings.Contains(copilot.(*fileAgent).block("copilot@abc"), `"tools":["*"]`) {
+		t.Fatalf("Copilot's shape: %s", copilot.(*fileAgent).block("copilot@abc"))
+	}
+	t.Setenv("COPILOT_HOME", filepath.Join(home, "elsewhere"))
+	if got := copilot.(*fileAgent).mcpPath(); got != filepath.Join(home, "elsewhere", "mcp-config.json") {
+		t.Fatalf("COPILOT_HOME moves the file: %s", got)
+	}
+	open, _ := New("opencode", Options{Home: home})
+	if !strings.Contains(open.(*fileAgent).block("opencode@abc"), `"command":["/usr/local/bin/contro1","mcp","serve"`) {
+		t.Fatalf("OpenCode's command is one array: %s", open.(*fileAgent).block("opencode@abc"))
+	}
+
+	// OpenCode's file with comments in it: left alone, and the block is printed.
+	dir := filepath.Join(home, ".config", "opencode")
+	_ = os.MkdirAll(dir, 0o700)
+	commented := "{\n  // mine\n  \"mcp\": {}\n}"
+	_ = os.WriteFile(filepath.Join(dir, "opencode.jsonc"), []byte(commented), 0o600)
+	a := open.(*fileAgent)
+	if a.mcpPath() != filepath.Join(dir, "opencode.jsonc") {
+		t.Fatalf("the file that is there: %s", a.mcpPath())
+	}
+	var j Journal
+	out, err := a.InstallMcp(context.Background(), []string{"opencode@abc"}, &j)
+	if err != nil || len(out.ToDo) != 1 || !strings.Contains(out.ToDo[0], `"contro1"`) {
+		t.Fatalf("the exact block to paste: %+v %v", out, err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(dir, "opencode.jsonc")); string(raw) != commented {
+		t.Fatalf("a commented file is not rewritten: %s", raw)
+	}
+}
+
 // ---- Cursor ------------------------------------------------------------------
 
 func cursorIn(t *testing.T) (*cursor, string) {

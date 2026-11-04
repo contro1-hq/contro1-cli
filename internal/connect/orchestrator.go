@@ -858,21 +858,7 @@ func coversItems(m *runtimeproto.MappingFile, items []PreparedItem) bool {
 	return len(m.Entries) > 0
 }
 
-func instanceLabel(p string) string {
-	switch p {
-	case "openclaw":
-		return "OpenClaw"
-	case "nanoclaw":
-		return "NanoClaw"
-	case "claude-code":
-		return "Claude Code"
-	case "cursor":
-		return "Cursor"
-	case "codex":
-		return "Codex"
-	}
-	return p
-}
+func instanceLabel(p string) string { return platforms.Label(p) }
 
 // hostGOOS is overridable in tests through HostOS.
 // pendingServiceUpdate is the preview line for a due service update, or "".

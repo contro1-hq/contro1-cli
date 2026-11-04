@@ -10,7 +10,7 @@ import (
 )
 
 /*
-Cursor and Codex connect the way Claude Code does: one agent per computer, with
+Coding agents connect the way Claude Code does: one agent per computer, with
 its own owner-approved connection, instead of a person sign-in.
 
 WHY. Both could only reach Contro1 through `contro1 mcp login`, which acts as
@@ -21,14 +21,14 @@ specific to Claude: a terminal or editor tool on this computer, driven by
 whoever sits at it, with an MCP client that runs `contro1 mcp serve`.
 
 What differs per platform is only where its MCP server is registered
-(cursor_mcp.go, codex_mcp.go). The subject is "<platform>@<machine key>", the
+(mcp_file.go, codex_mcp.go). The subject is "<platform>@<machine key>", the
 same stable machine id Claude Code uses (machineid.go), so a network that
 renames the computer does not mint a second agent. There is no hostname-era
 subject to keep: these platforms never had one.
 */
 type localCodingAgent struct {
-	platform string // "cursor" | "codex"
-	label    string // "Cursor" | "Codex"
+	platform string // "cursor", "codex", "antigravity"...
+	label    string // "Cursor", "Codex", "Antigravity"...
 	opts     Options
 	// Test seams; nil means this computer's own.
 	hostname    func() (string, error)
@@ -36,9 +36,6 @@ type localCodingAgent struct {
 	mappingPath string
 }
 
-func newCursor(opts Options) *cursor {
-	return &cursor{localCodingAgent{platform: "cursor", label: "Cursor", opts: opts}}
-}
 func newCodex(opts Options) *codex {
 	return &codex{localCodingAgent{platform: "codex", label: "Codex", opts: opts}}
 }
@@ -149,23 +146,8 @@ func (a *localCodingAgent) mcpConfigDir(defaultDir string) string {
 }
 
 // ---------------------------------------------------------------------------
-// The two platforms. Their MCP registration is in cursor_mcp.go and codex_mcp.go.
+// Codex. The platforms with a JSON file are a table in mcp_file.go.
 // ---------------------------------------------------------------------------
-
-type cursor struct{ localCodingAgent }
-
-func (c *cursor) SafeTest() string {
-	return "Try it: open a new Cursor agent chat and ask it to call the Contro1 whoami tool. It answers with this agent's name."
-}
-
-func (c *cursor) ApplicationChanges(conn LocalConnection) []Change {
-	return c.McpChanges(context.Background(), []string{conn.PlatformSubject})
-}
-
-func (c *cursor) ApplyApplications(ctx context.Context, conn LocalConnection, j *Journal) error {
-	_, err := c.InstallMcp(ctx, []string{conn.PlatformSubject}, j)
-	return err
-}
 
 type codex struct{ localCodingAgent }
 

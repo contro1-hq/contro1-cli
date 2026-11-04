@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -64,6 +65,133 @@ func TestReadSkillAndFind(t *testing.T) {
 	meta, _ := readSkill(dir, root, home)
 	if meta.SkillMD != "" || len(meta.Files) != 0 || meta.BundleDigest != s.BundleDigest {
 		t.Fatal("--metadata-only sends the same digest and no content")
+	}
+}
+
+// Installers link one shared copy into each agent's folder. The copy must be
+// found at the agent's path, read whole, and carry the digest of the real files,
+// or a skill from the library would show up as unmanaged. Linking a folder that
+// is not a skill must not pull it in.
+func TestLinkedSkillIsFoundAndReadWhole(t *testing.T) {
+	cases := map[string]func(target, link string) error{
+		"symlink": os.Symlink,
+	}
+	if runtime.GOOS == "windows" {
+		// Works without administrator rights, unlike a symlink.
+		cases["junction"] = func(target, link string) error {
+			return exec.Command("cmd", "/c", "mklink", "/J", link, target).Run()
+		}
+	}
+	for name, makeLink := range cases {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			shared := filepath.Join(home, "shared", "refunds")
+			if err := os.MkdirAll(filepath.Join(shared, "scripts"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			_ = os.WriteFile(filepath.Join(shared, "SKILL.md"), []byte("---\nname: refunds\n---\n\nbody\n"), 0o644)
+			_ = os.WriteFile(filepath.Join(shared, "scripts", "a.sh"), []byte("echo hi"), 0o644)
+			notSkill := filepath.Join(home, "shared", "documents")
+			_ = os.MkdirAll(notSkill, 0o755)
+			_ = os.WriteFile(filepath.Join(notSkill, "secret.txt"), []byte("x"), 0o644)
+
+			root := skillRoot{filepath.Join(home, ".claude", "skills"), "claude-code", "user", false}
+			_ = os.MkdirAll(root.dir, 0o755)
+			link := filepath.Join(root.dir, "refunds")
+			if err := makeLink(shared, link); err != nil {
+				t.Skipf("cannot make a %s here: %v", name, err)
+			}
+			if err := makeLink(notSkill, filepath.Join(root.dir, "documents")); err != nil {
+				t.Fatal(err)
+			}
+
+			dirs := findSkillDirs(root)
+			if len(dirs) != 1 || dirs[0] != link {
+				t.Fatalf("found %v, want only %s", dirs, link)
+			}
+			linked, err := readSkill(link, root, home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			real, err := readSkill(shared, skillRoot{filepath.Dir(shared), "agents", "user", false}, home)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if linked.BundleDigest != real.BundleDigest || linked.FileCount != 2 || len(linked.Files) != 1 {
+				t.Fatalf("a linked skill reads as %d file(s) with digest %s, the real one %s", linked.FileCount, linked.BundleDigest, real.BundleDigest)
+			}
+			if linked.Path != "~/.claude/skills/refunds" {
+				t.Fatalf("reported at %s, not where the agent finds it", linked.Path)
+			}
+		})
+	}
+}
+
+// The whole skills folder can be a link too, into a dotfiles repository.
+func TestLinkedSkillsFolderIsSearched(t *testing.T) {
+	home := t.TempDir()
+	dotfiles := filepath.Join(home, "dotfiles", "skills")
+	writeSkill(t, filepath.Join(dotfiles, "refunds"))
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
+	dir := filepath.Join(home, ".claude", "skills")
+	if err := os.Symlink(dotfiles, dir); err != nil {
+		t.Skipf("cannot make a symlink here: %v", err)
+	}
+	dirs := findSkillDirs(skillRoot{dir, "claude-code", "user", false})
+	if len(dirs) != 1 || dirs[0] != filepath.Join(dir, "refunds") {
+		t.Fatalf("found %v", dirs)
+	}
+}
+
+// The folders added from each vendor's documentation are searched at all.
+func TestNewlyDocumentedFoldersAreSearched(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	want := map[string]string{
+		filepath.Join(home, ".gemini", "config", "skills"): "antigravity",
+		filepath.Join(home, ".cline", "skills"):            "cline",
+		filepath.Join(home, ".config", "amp", "skills"):    "amp",
+		filepath.Join(home, ".agent", "skills"):            "agent",
+		filepath.Join(project, ".factory", "skills"):       "factory",
+		filepath.Join(project, ".kilo", "skills"):          "kilo",
+		filepath.Join(project, ".warp", "skills"):          "warp",
+		filepath.Join(project, ".clinerules", "skills"):    "cline",
+	}
+	roots := knownAgentRoots(home, project)
+	for dir, client := range want {
+		found := false
+		for _, r := range roots {
+			found = found || (r.dir == dir && r.client == client)
+		}
+		if !found {
+			t.Fatalf("%s is not searched as %s", dir, client)
+		}
+	}
+	if len(systemSkillRoots()) == 0 || systemSkillRoots()[0].client != "claude-code" {
+		t.Fatalf("Claude Code's managed folder comes first: %+v", systemSkillRoots())
+	}
+}
+
+func TestDetectAgents(t *testing.T) {
+	home := t.TempDir()
+	for _, dir := range []string{".claude", ".cursor", ".openclaw", ".agents", filepath.Join(".vscode", "extensions", "github.copilot-1.2.3")} {
+		_ = os.MkdirAll(filepath.Join(home, dir), 0o755)
+	}
+	got := strings.Join(detectAgents(home, false), ",")
+	if got != "claude-code,copilot,copilot-vscode,cursor,openclaw" {
+		t.Fatalf("found %s; the shared .agents folder is no agent, and only what is here counts", got)
+	}
+	if empty := detectAgents(t.TempDir(), false); empty == nil || len(empty) != 0 {
+		t.Fatalf("nothing found must be an empty list, which the server reads as checked: %#v", empty)
+	}
+	other := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(other, ".codex"), 0o755)
+	byHome := wslAgents([]string{home, other})
+	if got := strings.Join(byHome[filepath.ToSlash(other)], ","); got != "codex" {
+		t.Fatalf("a home answers for itself, not for another distribution: %s", got)
+	}
+	if got := strings.Join(byHome[filepath.ToSlash(home)], ","); got != "claude-code,copilot,copilot-vscode,cursor,openclaw" {
+		t.Fatalf("each home is listed: %s", got)
 	}
 }
 

@@ -40,11 +40,17 @@ var (
 )
 
 var connectCmd = &cobra.Command{
-	Use:     "connect <openclaw|nanoclaw|claude-code|cursor|codex>",
+	Use:     "connect <platform>",
 	Short:   "Connect the agents on this computer to Contro1, approved by their owner",
 	GroupID: groupAgent,
 	Long: `Finds the agents on this computer, asks their accountable owner to approve
 them once, sets up the Contro1 service, and points the platform at it.
+
+Platforms: openclaw, nanoclaw, claude-code, cursor, codex, antigravity, gemini,
+copilot, windsurf, opencode, amp, augment, devin, factory, kiro, qwen.
+
+Claude Cowork is not one of them: it runs without this computer's MCP servers, so
+add Contro1 to it as a connector, under Customize.
 
 Re-running is safe: it repairs what drifted and never creates duplicates.
 With --format json every result is a next-step object for automation.`,
