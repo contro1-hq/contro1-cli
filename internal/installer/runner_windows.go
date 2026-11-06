@@ -376,3 +376,29 @@ func RunElevated(args []string) (int, error) {
 
 // SudoHint is empty on Windows; elevation uses UAC.
 func SudoHint(string) string { return "" }
+
+// InstalledServiceDefinition is the installed service's command line, "" when
+// there is none. Read with query rights, which every user has.
+func InstalledServiceDefinition() string {
+	h, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return ""
+	}
+	m := &mgr.Mgr{Handle: h}
+	defer m.Disconnect()
+	name, err := windows.UTF16PtrFromString(brokerpaths.ServiceName)
+	if err != nil {
+		return ""
+	}
+	sh, err := windows.OpenService(h, name, windows.SERVICE_QUERY_CONFIG)
+	if err != nil {
+		return ""
+	}
+	s := &mgr.Service{Name: brokerpaths.ServiceName, Handle: sh}
+	defer s.Close()
+	cfg, err := s.Config()
+	if err != nil {
+		return ""
+	}
+	return cfg.BinaryPathName
+}

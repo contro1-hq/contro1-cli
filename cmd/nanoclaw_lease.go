@@ -161,15 +161,7 @@ func renewNanoLease(ctx context.Context, l nanoLease, run onecliRunner) (nanoLea
 		return l, err
 	}
 	if status != http.StatusOK {
-		var refusal struct {
-			Error   string `json:"error"`
-			Message string `json:"message"`
-		}
-		_ = json.Unmarshal(raw, &refusal)
-		if refusal.Error == "lease_not_live" {
-			return l, errors.New("the lease already expired or was revoked. Its owner has to approve the connection again: contro1 apps enable nanoclaw --agent " + l.Subject)
-		}
-		return l, fmt.Errorf("Contro1 refused the renewal (HTTP %d %s)", status, refusal.Error)
+		return l, renewRefusal(status, raw, l.Subject)
 	}
 	var next renewedLease
 	if err := json.Unmarshal(raw, &next); err != nil || next.Lease == "" || next.LeaseID == "" {
@@ -194,10 +186,82 @@ func renewNanoLease(ctx context.Context, l nanoLease, run onecliRunner) (nanoLea
 	return renewed, nil
 }
 
-// ensureRenewalSchedule adds one crontab line that runs the renewal every six
-// hours. Idempotent, and never touches the person's other entries. Returns a
-// human-readable reason when it could not, so the caller can say what to do.
+/*
+renewRefusal says why a renewal was refused, in the words of whoever refused.
+
+Two shapes answer here: the server's ({"error": "lease_not_live", "message":
+...}) and the local service's own ({"error": {"code", "message",
+"remediation"}}). Only the first was read, so every refusal by the local
+service printed as "HTTP 403" or "HTTP 502" with an empty reason, and a host
+whose service was too old for this route, or had lost its Contro1 address,
+looked the same as one Contro1 had turned down.
+*/
+func renewRefusal(status int, raw []byte, subject string) error {
+	var body struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	code, message, next := "", body.Message, ""
+	if err := json.Unmarshal(body.Error, &code); err != nil {
+		var structured struct {
+			Code        string `json:"code"`
+			Message     string `json:"message"`
+			Remediation struct {
+				NextStep string `json:"next_step"`
+			} `json:"remediation"`
+		}
+		if json.Unmarshal(body.Error, &structured) == nil {
+			code, next = structured.Code, structured.Remediation.NextStep
+			if structured.Message != "" {
+				message = structured.Message
+			}
+		}
+	}
+	switch code {
+	case "lease_not_live":
+		return errors.New("the lease already expired or was revoked. Its owner has to approve the connection again: contro1 apps enable nanoclaw --agent " + subject)
+	case "ENDPOINT_METHOD_NOT_ALLOWED":
+		// The current service forwards this route in every mode, so only a
+		// service older than the route (before 0.2.19) refuses it.
+		return fmt.Errorf("the Contro1 service on this computer is older than this CLI and cannot renew the credential. Update it with: %s, then run contro1 apps renew-nanoclaw --force", serviceUpdateCommandWithURL())
+	}
+	out := fmt.Sprintf("the renewal was refused (HTTP %d", status)
+	if code != "" {
+		out += " " + code
+	}
+	out += ")"
+	if message != "" {
+		out += ": " + strings.TrimRight(message, ".") + "."
+	}
+	if next != "" {
+		out += " " + next
+	}
+	return errors.New(out)
+}
+
+/*
+ensureRenewalSchedule adds one crontab line that runs the renewal every six
+hours. Idempotent, and never touches the person's other entries. Returns a
+human-readable reason when it could not, so the caller can say what to do.
+
+The output goes to a log next to the lease record, not to /dev/null. A month of
+failed renewals on one host left no trace anywhere, and the first sign was the
+agent losing Contro1. A line written by an older CLI is replaced in place, by
+its marker.
+*/
 func ensureRenewalSchedule(ctx context.Context) (bool, string) {
+	return writeRenewalSchedule(ctx, false)
+}
+
+// upgradeRenewalSchedule rewrites a renewal line an older CLI installed, and
+// adds none: run by the renewal itself, so a host picks up the logged line
+// without anyone running apps enable again.
+func upgradeRenewalSchedule(ctx context.Context) {
+	_, _ = writeRenewalSchedule(ctx, true)
+}
+
+func writeRenewalSchedule(ctx context.Context, onlyIfPresent bool) (bool, string) {
 	if _, err := exec.LookPath("crontab"); err != nil {
 		return false, "crontab is not installed on this computer"
 	}
@@ -208,22 +272,63 @@ func ensureRenewalSchedule(ctx context.Context) (bool, string) {
 	if resolved, err := filepath.EvalSymlinks(bin); err == nil {
 		bin = resolved
 	}
+	logPath, err := renewLogPath()
+	if err != nil {
+		return false, "could not resolve where to keep the renewal log"
+	}
 	current, _ := exec.CommandContext(ctx, "crontab", "-l").Output()
-	if strings.Contains(string(current), renewCronMarker) {
+	if onlyIfPresent && !strings.Contains(string(current), renewCronMarker) {
 		return true, ""
 	}
-	line := fmt.Sprintf("17 */6 * * * %s apps renew-nanoclaw --quiet >/dev/null 2>&1 %s", shellQuote(bin), renewCronMarker)
-	next := strings.TrimRight(string(current), "\n")
-	if next != "" {
-		next += "\n"
+	next, changed := withRenewalLine(string(current), renewCronLine(bin, logPath))
+	if !changed {
+		return true, ""
 	}
-	next += line + "\n"
 	cmd := exec.CommandContext(ctx, "crontab", "-")
 	cmd.Stdin = strings.NewReader(next)
 	if err := cmd.Run(); err != nil {
 		return false, "crontab refused the entry"
 	}
 	return true, ""
+}
+
+// renewLogPath is where the scheduled renewal writes what it did.
+func renewLogPath() (string, error) {
+	dir, err := config.Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "nanoclaw-renew.log"), nil
+}
+
+func renewCronLine(bin, logPath string) string {
+	return fmt.Sprintf("17 */6 * * * %s apps renew-nanoclaw --quiet >>%s 2>&1 %s", shellQuote(bin), shellQuote(logPath), renewCronMarker)
+}
+
+// withRenewalLine is crontab text with exactly one renewal line, the one
+// given: added when there is none, replacing one an older CLI wrote.
+func withRenewalLine(current, line string) (string, bool) {
+	lines := strings.Split(strings.TrimRight(current, "\n"), "\n")
+	if strings.TrimSpace(current) == "" {
+		lines = nil
+	}
+	out := make([]string, 0, len(lines)+1)
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, renewCronMarker) {
+			if !found {
+				out = append(out, line)
+			}
+			found = true
+			continue
+		}
+		out = append(out, l)
+	}
+	if !found {
+		out = append(out, line)
+	}
+	next := strings.Join(out, "\n") + "\n"
+	return next, next != current
 }
 
 func shellQuote(s string) string {

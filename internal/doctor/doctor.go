@@ -10,8 +10,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
+	"github.com/contro1-hq/contro1-cli/internal/config"
 	"github.com/contro1-hq/contro1-cli/internal/installer"
 	"github.com/contro1-hq/contro1-cli/internal/platforms"
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
@@ -114,6 +116,78 @@ func ServiceVersionCheck(c installer.ServiceComparison, updateCommand string) ru
 			version = c.To
 		}
 		check.Message = fmt.Sprintf("version %s (matches the CLI).", version)
+	}
+	return check
+}
+
+/*
+APIURLCheck says whether the service knows which Contro1 to ask.
+
+WHY. A service updated with an install command that dropped --api-url had no
+address, and every check after this one failed with "could not get a
+credential". ok is false for a service too old to report its address, and for
+one with no connections yet, which learns the address from its first.
+*/
+func APIURLCheck(status *brokerstore.PublicStatus, connections int, goos string) (runtimeproto.Check, bool) {
+	if status == nil || status.APIURL == nil {
+		return runtimeproto.Check{}, false
+	}
+	check := runtimeproto.Check{ID: "service_api_url", Label: "Contro1 address", Status: runtimeproto.CheckOK}
+	if *status.APIURL != "" {
+		check.Message = "The service talks to " + *status.APIURL + "."
+		return check, true
+	}
+	if connections == 0 {
+		return runtimeproto.Check{}, false
+	}
+	command := "sudo contro1 broker install --api-url " + config.DefaultAPIURL
+	if goos == "windows" {
+		command = "contro1 broker install --api-url " + config.DefaultAPIURL
+	}
+	check.Status, check.Actor = runtimeproto.CheckBlocked, "administrator"
+	check.Message = "The Contro1 service has no Contro1 address, so no agent on this computer can get a credential. Install it again with the address."
+	check.NextCommand = command
+	return check, true
+}
+
+// LeaseExpiryEnv is optional on an Env: the recorded expiry of the MCP
+// credential this computer handed to a subject's credential gateway.
+type LeaseExpiryEnv interface {
+	// LeaseExpiry is zero with recorded true when a lease is recorded with no
+	// known expiry (a renewal OneCLI did not take).
+	LeaseExpiry(platform, subject string) (expires time.Time, recorded bool)
+}
+
+// leaseWarnBefore matches when the scheduled renewal acts: a lease this close
+// to expiry means the renewal has not been working.
+const leaseWarnBefore = 7 * 24 * time.Hour
+
+/*
+LeaseExpiryCheck says how long the agent's Contro1 credential has left.
+
+WHY. A NanoClaw host's renewals failed for a month while doctor stayed green:
+nothing it checked looked at the credential OneCLI injects, and the first sign
+was the agent losing Contro1. A lease past expiry cannot be renewed; only its
+owner can issue a new one.
+*/
+func LeaseExpiryCheck(platform, subject string, expires, now time.Time) runtimeproto.Check {
+	check := runtimeproto.Check{ID: "lease_expiry:" + subject, Label: "Contro1 credential for " + subject, Status: runtimeproto.CheckOK}
+	renew := fmt.Sprintf("contro1 apps renew-nanoclaw --agent %s --force", subject)
+	switch {
+	case expires.IsZero():
+		check.Status, check.Actor = runtimeproto.CheckRepairable, "you"
+		check.Message = "The last renewal was not handed over completely, so its expiry is unknown here. Renew it now."
+		check.NextCommand = renew
+	case !now.Before(expires):
+		check.Status, check.Actor = runtimeproto.CheckBlocked, "owner"
+		check.Message = fmt.Sprintf("Expired on %s, so %s cannot use applications through Contro1. Its accountable owner has to issue a new one on this computer.", expires.UTC().Format("2006-01-02"), subject)
+		check.NextCommand = fmt.Sprintf("contro1 apps enable %s --agent %s", platform, subject)
+	case expires.Sub(now) < leaseWarnBefore:
+		check.Status, check.Actor = runtimeproto.CheckRepairable, "you"
+		check.Message = fmt.Sprintf("Expires on %s and the scheduled renewal has not renewed it. Renew it now and read the renewal log.", expires.UTC().Format("2006-01-02"))
+		check.NextCommand = renew
+	default:
+		check.Message = fmt.Sprintf("Valid until %s; renewed automatically a week before.", expires.UTC().Format("2006-01-02"))
 	}
 	return check
 }
@@ -224,6 +298,9 @@ func Run(ctx context.Context, env Env, platform string) Report {
 		default:
 			add(&r, runtimeproto.Check{ID: "key_protection", Label: "Keys protected", Status: runtimeproto.CheckOK, Message: "Key protection: " + status.KeyProtection + "."})
 		}
+		if c, ok := APIURLCheck(status, len(status.Enrollments), env.GOOS()); ok {
+			add(&r, c)
+		}
 	}
 
 	if installed && !env.IsElevated() {
@@ -274,6 +351,11 @@ func Run(ctx context.Context, env Env, platform string) Report {
 				addApplicationChecks(ctx, &r, env, platform, e)
 			}
 			addLeaseExposureChecks(ctx, &r, env, e)
+			if le, ok := env.(LeaseExpiryEnv); ok {
+				if expires, recorded := le.LeaseExpiry(platform, e.PlatformSubject); recorded {
+					add(&r, LeaseExpiryCheck(platform, e.PlatformSubject, expires, time.Now()))
+				}
+			}
 		}
 		if installsMcp {
 			addMcpIsolationChecks(ctx, &r, env, platform, mapping, discovered)

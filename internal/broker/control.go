@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/contro1-hq/contro1-cli/internal/brokerstore"
+	"github.com/contro1-hq/contro1-cli/internal/config"
 	"github.com/contro1-hq/contro1-cli/internal/dpop"
 	"github.com/contro1-hq/contro1-cli/internal/runtimeproto"
 	"github.com/contro1-hq/contro1-cli/internal/tokenprovider"
@@ -456,7 +458,31 @@ func (b *Broker) handleShutdown(w http.ResponseWriter, _ *http.Request) {
 	}()
 }
 
+// MissingAPIURLCode is the refusal when the service has no Contro1 address.
+const MissingAPIURLCode = "RUNTIME_API_URL_MISSING"
+
+// MissingAPIURLRemediation says what to run when the service does not know
+// which Contro1 to ask. The command names the address, so it works whatever
+// the installed definition says.
+func MissingAPIURLRemediation(goos string) runtimeproto.Remediation {
+	next := "sudo contro1 broker install --api-url " + config.DefaultAPIURL
+	if goos == "windows" {
+		next = "From an administrator terminal: contro1 broker install --api-url " + config.DefaultAPIURL
+	}
+	return runtimeproto.Remediation{
+		Code:          MissingAPIURLCode,
+		PublicMessage: "The Contro1 service on this computer has no Contro1 address, so it cannot get a credential.",
+		Missing:       "The Contro1 address in the service definition (--api-url).",
+		NextStep:      "Run: " + next,
+		Retryable:     false,
+	}
+}
+
 func (b *Broker) writeTokenError(w http.ResponseWriter, err error) {
+	if errors.Is(err, tokenprovider.ErrNoAPIURL) {
+		writeRemediation(w, 503, MissingAPIURLRemediation(runtime.GOOS))
+		return
+	}
 	var te *tokenprovider.Error
 	if errors.As(err, &te) {
 		if te.Remediation != nil {

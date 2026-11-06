@@ -86,13 +86,16 @@ type EnrollmentStatus struct {
 }
 
 type PublicStatus struct {
-	SchemaVersion int                `json:"schema_version"`
-	UpdatedAt     string             `json:"updated_at"`
-	BrokerVersion string             `json:"broker_version"`
-	PID           int                `json:"pid"`
-	KeyProtection string             `json:"key_protection"`
-	Foreground    bool               `json:"foreground"`
-	Enrollments   []EnrollmentStatus `json:"enrollments"`
+	SchemaVersion int    `json:"schema_version"`
+	UpdatedAt     string `json:"updated_at"`
+	BrokerVersion string `json:"broker_version"`
+	PID           int    `json:"pid"`
+	KeyProtection string `json:"key_protection"`
+	Foreground    bool   `json:"foreground"`
+	// APIURL is the Contro1 address the service uses. A pointer so doctor can
+	// tell a service that has none ("") from an older one that never said (nil).
+	APIURL      *string            `json:"api_url,omitempty"`
+	Enrollments []EnrollmentStatus `json:"enrollments"`
 }
 
 var ErrLocked = errors.New("brokerstore: another Contro1 service is already using this state directory")

@@ -233,3 +233,18 @@ func ServiceStatus() (installed, running, automatic bool, account string) {
 	automatic = exec.Command("systemctl", "is-enabled", "--quiet", "contro1-broker.service").Run() == nil
 	return installed, running, automatic, brokerpaths.LinuxUser
 }
+
+// InstalledServiceDefinition is the text of the installed service definition
+// (the systemd unit or the launchd plist), "" when there is none. Both are
+// readable by every user.
+func InstalledServiceDefinition() string {
+	p := "/etc/systemd/system/contro1-broker.service"
+	if runtime.GOOS == "darwin" {
+		p = "/Library/LaunchDaemons/com.contro1.broker.plist"
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}

@@ -148,6 +148,32 @@ func serviceUpdateCommand() string {
 	return installer.UpdateCommand(runtime.GOOS, exe)
 }
 
+/*
+serviceUpdateCommandWithURL is the update command with the Contro1 address
+written out, for a person who may run it with an older CLI than this one. An
+install from before 0.2.36 drops the address when the command has none.
+
+THE SERVICE'S OWN ADDRESS, OR CONTRO1. The command repairs the installed
+service, so it keeps the Contro1 that service already talks to. When the service
+has no address anywhere, it is the Contro1 service, never this CLI's profile:
+a profile pointed at a local development server would have moved a production
+service there and stranded every connection on this computer. Doctor proposes
+the same address in the same case.
+*/
+func serviceUpdateCommandWithURL() string {
+	return serviceUpdateCommand() + " --api-url " + serviceRepairAPIURL()
+}
+
+// serviceRepairAPIURL is a variable so tests do not read this computer's service.
+var serviceRepairAPIURL = func() string {
+	return serviceRepairAPIURLFrom(context.Background(), brokerLayout(false))
+}
+
+// serviceRepairAPIURLFrom falls back to config.DefaultAPIURL (installer.ServiceAPIURL).
+func serviceRepairAPIURLFrom(ctx context.Context, layout brokerpaths.Layout) string {
+	return installer.ServiceAPIURL("", installedAPIURLSources(ctx, layout)...)
+}
+
 func (s *serviceBroker) serviceUpdate() installer.ServiceComparison {
 	if s.development || s.compare == nil {
 		return installer.ServiceComparison{}
@@ -492,7 +518,8 @@ func runRegisterPhase(ctx context.Context, path string) error {
 	}
 	if installed, running, _, _ := serviceStatus(); !installed || !running {
 		exe, _ := os.Executable()
-		plan := installer.Plan(runtime.GOOS, installer.Options{SourceBinary: exe, APIURL: phase.APIURL, Version: Version})
+		apiURL := installer.ServiceAPIURL(phase.APIURL, installedAPIURLSources(ctx, layout)...)
+		plan := installer.Plan(runtime.GOOS, installer.Options{SourceBinary: exe, APIURL: apiURL, Version: Version})
 		if _, err := installer.Apply(plan, installer.SystemRunner{}, filepath.Join(layout.StateDir, "install-journal.json")); err != nil {
 			return finish(nil, err)
 		}
@@ -534,9 +561,8 @@ without one, and on Linux and macOS the step rewrites the service definition,
 so a definition without --api-url would have dropped it.
 */
 func updateServiceBinary(ctx context.Context, layout brokerpaths.Layout, apiURL string) (string, error) {
-	if health, err := controlCall(ctx, layout, "GET", "/control/v1/health", nil); err == nil && str(health["api_url"]) != "" {
-		apiURL = str(health["api_url"])
-	}
+	sources := append(installedAPIURLSources(ctx, layout), func() string { return apiURL })
+	apiURL = installer.ServiceAPIURL("", sources...)
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -547,6 +573,35 @@ func updateServiceBinary(ctx context.Context, layout brokerpaths.Layout, apiURL 
 	}
 	return waitForServiceVersion(ctx, layout, Version, 45*time.Second)
 }
+
+/*
+installedAPIURLSources are where an installed service keeps its Contro1
+address, most reliable first: what the running service answers, what its
+state recorded, and what its definition passes it. Each is "" when it cannot
+be read; the state needs root, the other two do not.
+*/
+func installedAPIURLSources(ctx context.Context, layout brokerpaths.Layout) []func() string {
+	return []func() string{
+		func() string {
+			c, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			if health, err := controlCall(c, layout, "GET", "/control/v1/health", nil); err == nil {
+				return str(health["api_url"])
+			}
+			return ""
+		},
+		func() string {
+			if st, err := brokerstore.OpenReadOnly(layout.StateDir).LoadState(); err == nil {
+				return st.APIURL
+			}
+			return ""
+		},
+		func() string { return installer.APIURLFromDefinition(installedServiceDefinition()) },
+	}
+}
+
+// installedServiceDefinition is a variable so tests read a fake definition.
+var installedServiceDefinition = installer.InstalledServiceDefinition
 
 // waitForServiceVersion is the check that the update worked: the service is
 // back and is the version that was installed, not merely a file copied.

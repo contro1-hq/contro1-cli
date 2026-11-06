@@ -342,6 +342,14 @@ previous binary back.
 command that updates it: `contro1 broker install` on Windows, `sudo <path to
 contro1> broker install` on macOS and Linux.
 
+The service keeps the Contro1 address it already uses: without `--api-url`, the
+install reads it from the running service, its state, or its current service
+definition, and uses `https://api.contro1.com` only when none has one. Pass
+`--api-url` to change it. A CLI older than 0.2.36 does not do this and writes a
+service definition without the address, so with an older CLI always pass
+`--api-url https://api.contro1.com`. `contro1 doctor` reports a service with no
+address as blocked, with the command that fixes it.
+
 ## Convenience versus non-bypassable enforcement
 
 | Setup | Protects against | What can still bypass it |

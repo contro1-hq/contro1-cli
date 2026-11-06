@@ -166,6 +166,10 @@ func dropPrevious(dest string) { _ = os.Remove(dest + ".previous") }
 // for this operating system. Windows asks for approval itself; on unix the
 // command needs root and names the executable, because sudo's PATH often does
 // not include where contro1 was installed.
+//
+// No --api-url: the command runs this same CLI, whose install keeps the
+// address the service already has (ServiceAPIURL). Before that, this exact
+// command dropped the address from the service definition.
 func UpdateCommand(goos, exe string) string {
 	if goos == "windows" {
 		return "contro1 broker install"

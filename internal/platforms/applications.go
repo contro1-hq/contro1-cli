@@ -164,10 +164,17 @@ worth more than doing them invisibly.
 */
 func (n *nanoClaw) OptionalSetup() []string { return nil }
 
+/*
+NanoPreferContro1Step lives in NanoClaw's own source, so nothing here can see
+whether it was done: the channel and the approver can be in place while a card
+raised in WhatsApp still stays in WhatsApp. It is never reported as done.
+*/
+const NanoPreferContro1Step = "Make approval cards prefer Contro1, so a card raised in WhatsApp still comes here (step 4 of that skill)."
+
 func (n *nanoClaw) RemainingSetup() []string {
 	return []string{
 		"Install the Contro1 channel into NanoClaw: copy contro1.ts and contro1-governance.ts into src/channels/ and add the import. See skills/add-contro1 in the connector.",
-		"Make approval cards prefer Contro1, so a card raised in WhatsApp still comes here (step 4 of that skill).",
+		NanoPreferContro1Step,
 		"Build and restart NanoClaw.",
 		"Make Contro1 an approver: contro1 connect nanoclaw --confirm-roles",
 		"Check it: contro1 doctor nanoclaw",

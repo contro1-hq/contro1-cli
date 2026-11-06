@@ -396,3 +396,25 @@ func (e *systemDoctorEnv) mcpServersFromPlatform(ctx context.Context) ([]doctor.
 	}
 	return out, nil
 }
+
+// LeaseExpiry is the recorded expiry of a NanoClaw subject's MCP lease
+// (doctor.LeaseExpiryEnv). Recorded by apps enable and each renewal.
+func (e *systemDoctorEnv) LeaseExpiry(platform, subject string) (time.Time, bool) {
+	if platform != "nanoclaw" {
+		return time.Time{}, false
+	}
+	path, err := nanoLeasePath()
+	if err != nil {
+		return time.Time{}, false
+	}
+	f, err := loadNanoLeases(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	for _, l := range f.Leases {
+		if l.Subject == subject {
+			return l.ExpiresAt, true
+		}
+	}
+	return time.Time{}, false
+}

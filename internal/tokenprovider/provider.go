@@ -74,6 +74,17 @@ func (e *Error) Terminal() bool {
 	return false
 }
 
+/*
+ErrNoAPIURL is a service that does not know which Contro1 to ask.
+
+WHY ITS OWN ERROR. Without an address the token endpoint was a bare path, the
+proof refused it before anything left the computer, and the caller saw "could
+not get a credential" with nothing to act on. It happened to a service updated
+with an install command that dropped the address from its definition. It is
+checked before the refresh journal is written, so nothing looks interrupted.
+*/
+var ErrNoAPIURL = errors.New("runtime token: the Contro1 service has no Contro1 address (--api-url)")
+
 func IsTerminal(err error) bool {
 	var te *Error
 	return errors.As(err, &te) && te.Terminal()
@@ -204,6 +215,9 @@ func (p *Provider) AccessToken(ctx context.Context, localID, resource string) (s
 	}
 	if enr.State != "active" {
 		return "", &Error{Kind: "not_connected", Reason: "connection is " + enr.State}
+	}
+	if p.APIURL == "" {
+		return "", ErrNoAPIURL
 	}
 	signer, err := p.Signer(enr.KeyRef)
 	if err != nil {
@@ -375,6 +389,9 @@ type oauthErrorBody struct {
 // tokenRequest posts to the token endpoint with a fresh proof, retrying once
 // when the server asks for a nonce.
 func (p *Provider) tokenRequest(ctx context.Context, signer dpop.Signer, form url.Values) (*TokenResponse, error) {
+	if p.APIURL == "" {
+		return nil, ErrNoAPIURL
+	}
 	endpoint := p.APIURL + runtimeproto.TokenPath
 	for attempt := 0; attempt < 2; attempt++ {
 		proof, err := dpop.NewProof(signer, dpop.ProofInput{Method: "POST", URL: endpoint, Nonce: p.currentNonce(), Now: p.Now()})

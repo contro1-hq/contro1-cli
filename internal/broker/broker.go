@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -87,8 +88,27 @@ func New(cfg Config) (*Broker, error) {
 		store.Close()
 		return nil, err
 	}
-	if cfg.APIURL == "" {
+	/*
+	 * The address the service was started with is written down as well.
+	 *
+	 * A service started with --api-url never recorded it, because the state
+	 * only learned an address from the first connection made while it had
+	 * none. When an update rewrote the service definition without the flag,
+	 * nothing was left to read and every credential request failed. Recording
+	 * it here means the definition and the state agree after any start.
+	 */
+	cfg.APIURL = strings.TrimRight(strings.TrimSpace(cfg.APIURL), "/")
+	switch {
+	case cfg.APIURL == "":
 		cfg.APIURL = st.APIURL
+	case cfg.APIURL != st.APIURL:
+		if _, err := store.UpdateState(func(s *brokerstore.State) error { s.APIURL = cfg.APIURL; return nil }); err != nil {
+			cfg.Logf("could not record the Contro1 address %s: %v", cfg.APIURL, err)
+		}
+	}
+	if cfg.APIURL == "" && len(st.Enrollments) > 0 {
+		r := MissingAPIURLRemediation(runtime.GOOS)
+		cfg.Logf("no Contro1 address is set and %d connection(s) need one; no credential can be fetched. %s", len(st.Enrollments), r.NextStep)
 	}
 	if cfg.Keys == nil {
 		/*
@@ -329,7 +349,8 @@ func (b *Broker) writeStatus() {
 		listening[id] = true
 	}
 	b.mu.Unlock()
-	out := brokerstore.PublicStatus{BrokerVersion: b.cfg.Version, PID: os.Getpid(), KeyProtection: string(b.cfg.Keys.Protection()), Foreground: b.cfg.Foreground}
+	apiURL := b.cfg.APIURL
+	out := brokerstore.PublicStatus{BrokerVersion: b.cfg.Version, PID: os.Getpid(), KeyProtection: string(b.cfg.Keys.Protection()), Foreground: b.cfg.Foreground, APIURL: &apiURL}
 	for _, en := range st.Enrollments {
 		health := "stopped"
 		if listening[en.LocalID] {

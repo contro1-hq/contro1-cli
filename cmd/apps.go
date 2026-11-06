@@ -16,6 +16,7 @@ import (
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 
+	"github.com/contro1-hq/contro1-cli/internal/doctor"
 	"github.com/contro1-hq/contro1-cli/internal/localipc"
 	"github.com/contro1-hq/contro1-cli/internal/output"
 	"github.com/contro1-hq/contro1-cli/internal/platforms"
@@ -120,6 +121,68 @@ func appsEnableClosing(platform string, remaining, mcpTodo, optional []string, s
 		lines = append(lines, "  - "+step)
 	}
 	return append(lines, "Then check it with: contro1 doctor "+platform)
+}
+
+/*
+nanoRemainingSetup keeps only the NanoClaw steps that are not done.
+
+The steps were printed after every apps enable, on hosts where the channel was
+long installed and Contro1 already the approver, so a finished setup ended
+with "not working end to end yet". The platform is asked the same questions
+doctor asks. When it cannot answer, the steps stay, said as conditional.
+
+unchecked is what nothing here can see (platforms.NanoPreferContro1Step): with
+the channel and the approver in place it is still named, so a setup where
+cards stay in WhatsApp never ends with a plain "Done.".
+*/
+func nanoRemainingSetup(steps []string, status doctor.ApproverStatus, err error) (remaining, unchecked []string) {
+	switch {
+	case err != nil:
+		out := make([]string, 0, len(steps))
+		for _, s := range steps {
+			out = append(out, "If not done yet: "+s)
+		}
+		return out, nil
+	case status.ChannelPresent && status.ApproverMayResolve:
+		return nil, []string{platforms.NanoPreferContro1Step}
+	case status.ChannelPresent:
+		for _, s := range steps {
+			if strings.Contains(s, "--confirm-roles") || strings.Contains(s, "contro1 doctor") {
+				remaining = append(remaining, s)
+			}
+		}
+		return remaining, []string{platforms.NanoPreferContro1Step}
+	}
+	return steps, nil
+}
+
+/*
+withUnchecked adds what could not be checked to the closing lines. After a
+setup with nothing left, it replaces "Done." with what to confirm by hand and
+how to see that it works; with steps left, it joins them as conditional.
+*/
+func withUnchecked(lines, unchecked []string, remaining, mcpTodo []string, safeTest string) []string {
+	if len(unchecked) == 0 {
+		return lines
+	}
+	if len(remaining) == 0 && len(mcpTodo) == 0 {
+		out := []string{"Applications are set up. One step cannot be checked from here; confirm it once:"}
+		for _, u := range unchecked {
+			out = append(out, "  - "+u)
+		}
+		out = append(out, "If an approval card does not reach Contro1, that step is missing. "+safeTest)
+		return append(out, lines[1:]...)
+	}
+	out := make([]string, 0, len(lines)+len(unchecked))
+	for i, line := range lines {
+		if i == len(lines)-1 && strings.HasPrefix(line, "Then check it with:") {
+			for _, u := range unchecked {
+				out = append(out, "  - If not done yet: "+u)
+			}
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 func truncateForError(body string) string {
@@ -241,7 +304,14 @@ func init() {
 				return output.Errf(output.CodeNetwork, "%v", err)
 			}
 
-			for _, line := range appsEnableClosing(platform, adapter.RemainingSetup(), mcpTodo, adapter.OptionalSetup(), adapter.SafeTest()) {
+			remaining := adapter.RemainingSetup()
+			var unchecked []string
+			if platform == "nanoclaw" {
+				status, err := (&systemDoctorEnv{}).ApproverStatus(ctx, platform, conn.PlatformSubject)
+				remaining, unchecked = nanoRemainingSetup(remaining, status, err)
+			}
+			closing := appsEnableClosing(platform, remaining, mcpTodo, adapter.OptionalSetup(), adapter.SafeTest())
+			for _, line := range withUnchecked(closing, unchecked, remaining, mcpTodo, adapter.SafeTest()) {
 				prompt.Progress(line)
 			}
 			return renderApplicationsResult(conn, status, journal)
@@ -345,6 +415,7 @@ func init() {
 			if _, err := exec.LookPath("onecli"); err != nil {
 				return output.Errf(output.CodeNetwork, "OneCLI CLI is required on the NanoClaw host")
 			}
+			upgradeRenewalSchedule(cmd.Context())
 			now := time.Now()
 			var failures []string
 			for _, lease := range state.Leases {
@@ -363,7 +434,12 @@ func init() {
 				say(fmt.Sprintf("%s: renewed, valid until %s.", renewed.Subject, renewed.ExpiresAt.Format("2006-01-02")))
 			}
 			if len(failures) > 0 {
-				return output.Errf(output.CodeNetwork, "%s", strings.Join(failures, "; "))
+				msg := strings.Join(failures, "; ")
+				if renewQuiet {
+					// The scheduled run appends to a log; the time says which run.
+					msg = time.Now().UTC().Format(time.RFC3339) + " " + msg
+				}
+				return output.Errf(output.CodeNetwork, "%s", msg)
 			}
 			return nil
 		},

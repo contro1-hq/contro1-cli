@@ -225,7 +225,11 @@ func installOptions() (installer.Options, error) {
 	if err != nil {
 		return installer.Options{}, err
 	}
-	return installer.Options{SourceBinary: exe, APIURL: flagAPIURL, Version: Version}, nil
+	// Without --api-url the service keeps the address it already has. An
+	// update that wrote a definition without one left the service unable to
+	// get any credential.
+	apiURL := installer.ServiceAPIURL(flagAPIURL, installedAPIURLSources(context.Background(), brokerpaths.Production(runtime.GOOS))...)
+	return installer.Options{SourceBinary: exe, APIURL: apiURL, Version: Version}, nil
 }
 
 func needsElevationError(command string) error {
